@@ -16,11 +16,14 @@
     .kv { display:grid; grid-template-columns: 220px 1fr; gap:.35rem .75rem; margin:.5rem 0; }
     .kv div:nth-child(odd){ color:#555; }
     hr { border:0; border-top:1px solid #eee; margin:1rem 0; }
+    a { text-decoration: none; }
+    a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
   <h1>RDAP WHOIS</h1>
   <p class="muted">Podaj <b>domenę</b>, <b>IP</b> lub <b>AS</b> (np. <code>example.com</code>, <code>1.1.1.1</code>, <code>AS15169</code>).</p>
+
   <form method="get" action="/">
     <input type="text" name="q" placeholder="example.com" value="{{ q|e }}" autofocus>
     <button type="submit">Szukaj</button>
@@ -45,26 +48,26 @@
           <div>DNSSEC</div><div class="mono">{{ result.dnssec }}</div>
           {% if result.abuseContact.email %}<div>Registrar Abuse Contact Email</div><div class="mono">{{ result.abuseContact.email }}</div>{% endif %}
           {% if result.abuseContact.phone %}<div>Registrar Abuse Contact Phone</div><div class="mono">{{ result.abuseContact.phone }}</div>{% endif %}
-        </div>
-        <hr>
-        {% if result.statuses and result.statuses|length %}
-          <div><b>Domain Status</b></div>
-          <div class="mono">
+
+          {# Domain Status jako zwykłe wiersze #}
+          {% if result.statuses and result.statuses|length %}
             {% for st in result.statuses %}
-              • {{ st.raw }} — https://icann.org/epp#{{ st.epp }}<br>
+              <div>Domain Status</div>
+              <div class="mono">
+                {{ st.raw }} — <a href="https://icann.org/epp#{{ st.epp }}" target="_blank" rel="noopener">https://icann.org/epp#{{ st.epp }}</a>
+              </div>
             {% endfor %}
-          </div>
-          <hr>
-        {% endif %}
-        {% if result.nameServers and result.nameServers|length %}
-          <div><b>Name Server</b></div>
-          <div class="mono">
+          {% endif %}
+
+          {# Name Server jako zwykłe wiersze #}
+          {% if result.nameServers and result.nameServers|length %}
             {% for ns in result.nameServers %}
-              • {{ ns }}<br>
+              <div>Name Server</div><div class="mono">{{ ns }}</div>
             {% endfor %}
-          </div>
-        {% endif %}
+          {% endif %}
+        </div>
       </div>
+
     {% elif result.objectClassName == "ip network" %}
       <div class="card">
         <div class="kv">
@@ -80,6 +83,7 @@
           {% if result.abuseContact.phone %}<div>Abuse Phone</div><div class="mono">{{ result.abuseContact.phone }}</div>{% endif %}
         </div>
       </div>
+
     {% elif result.objectClassName == "autnum" %}
       <div class="card">
         <div class="kv">
@@ -93,6 +97,7 @@
           {% if result.abuseContact.phone %}<div>Abuse Phone</div><div class="mono">{{ result.abuseContact.phone }}</div>{% endif %}
         </div>
       </div>
+
     {% else %}
       <div class="card mono">{{ result | tojson(indent=2) }}</div>
     {% endif %}
