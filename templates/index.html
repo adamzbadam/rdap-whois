@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>RDAP WHOIS</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; }
+    form { display:flex; gap:.5rem; margin-bottom:1rem; }
+    input[type=text]{ flex:1; padding:.6rem; font-size:1rem; }
+    button{ padding:.6rem 1rem; font-size:1rem; cursor:pointer; }
+    .card{ border:1px solid #ddd; border-radius:8px; padding:1rem; }
+    .muted{ color:#666; font-size:.9rem; }
+    code { background:#f6f8fa; padding:.15rem .35rem; border-radius:4px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; white-space: pre-wrap; }
+    .kv { display:grid; grid-template-columns: 220px 1fr; gap:.35rem .75rem; margin:.5rem 0; }
+    .kv div:nth-child(odd){ color:#555; }
+    hr { border:0; border-top:1px solid #eee; margin:1rem 0; }
+  </style>
+</head>
+<body>
+  <h1>RDAP WHOIS</h1>
+  <p class="muted">Podaj <b>domenę</b>, <b>IP</b> lub <b>AS</b> (np. <code>example.com</code>, <code>1.1.1.1</code>, <code>AS15169</code>).</p>
+  <form method="get" action="/">
+    <input type="text" name="q" placeholder="example.com" value="{{ q|e }}" autofocus>
+    <button type="submit">Szukaj</button>
+  </form>
+
+  {% if error %}
+    <div class="card" style="border-color:#f00;color:#900;"><b>{{ error }}</b></div>
+  {% endif %}
+
+  {% if result %}
+    {% if result.objectClassName == "domain" %}
+      <div class="card">
+        <div class="kv">
+          <div>Domain Name</div><div class="mono">{{ result.domainName }}</div>
+          {% if result.registryDomainId %}<div>Registry Domain ID</div><div class="mono">{{ result.registryDomainId }}</div>{% endif %}
+          {% if result.updatedDate %}<div>Updated Date</div><div class="mono">{{ result.updatedDate }}</div>{% endif %}
+          {% if result.creationDate %}<div>Creation Date</div><div class="mono">{{ result.creationDate }}</div>{% endif %}
+          {% if result.expiryDate %}<div>Registry Expiry Date</div><div class="mono">{{ result.expiryDate }}</div>{% endif %}
+          {% if result.registrar %}<div>Registrar</div><div class="mono">{{ result.registrar }}</div>{% endif %}
+          {% if result.registrarIanaId %}<div>Registrar IANA ID</div><div class="mono">{{ result.registrarIanaId }}</div>{% endif %}
+          {% if result.registrarUrl %}<div>Registrar URL</div><div class="mono"><a href="{{ result.registrarUrl }}" target="_blank" rel="noopener">{{ result.registrarUrl }}</a></div>{% endif %}
+          <div>DNSSEC</div><div class="mono">{{ result.dnssec }}</div>
+          {% if result.abuseContact.email %}<div>Registrar Abuse Contact Email</div><div class="mono">{{ result.abuseContact.email }}</div>{% endif %}
+          {% if result.abuseContact.phone %}<div>Registrar Abuse Contact Phone</div><div class="mono">{{ result.abuseContact.phone }}</div>{% endif %}
+        </div>
+        <hr>
+        {% if result.statuses and result.statuses|length %}
+          <div><b>Domain Status</b></div>
+          <div class="mono">
+            {% for st in result.statuses %}
+              • {{ st.raw }} — https://icann.org/epp#{{ st.epp }}<br>
+            {% endfor %}
+          </div>
+          <hr>
+        {% endif %}
+        {% if result.nameServers and result.nameServers|length %}
+          <div><b>Name Server</b></div>
+          <div class="mono">
+            {% for ns in result.nameServers %}
+              • {{ ns }}<br>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </div>
+    {% elif result.objectClassName == "ip network" %}
+      <div class="card">
+        <div class="kv">
+          {% if result.handle %}<div>Network</div><div class="mono">{{ result.handle }}</div>{% endif %}
+          {% if result.cidr %}<div>CIDR</div><div class="mono">{{ result.cidr }}</div>{% endif %}
+          {% if result.range %}<div>Range</div><div class="mono">{{ result.range }}</div>{% endif %}
+          {% if result.ipVersion %}<div>Version</div><div class="mono">{{ result.ipVersion }}</div>{% endif %}
+          {% if result.name %}<div>Name</div><div class="mono">{{ result.name }}</div>{% endif %}
+          {% if result.type %}<div>Type</div><div class="mono">{{ result.type }}</div>{% endif %}
+          {% if result.country %}<div>Country</div><div class="mono">{{ result.country }}</div>{% endif %}
+          {% if result.org %}<div>Org</div><div class="mono">{{ result.org }}</div>{% endif %}
+          {% if result.abuseContact.email %}<div>Abuse Email</div><div class="mono">{{ result.abuseContact.email }}</div>{% endif %}
+          {% if result.abuseContact.phone %}<div>Abuse Phone</div><div class="mono">{{ result.abuseContact.phone }}</div>{% endif %}
+        </div>
+      </div>
+    {% elif result.objectClassName == "autnum" %}
+      <div class="card">
+        <div class="kv">
+          {% if result.asNumber %}<div>ASNumber</div><div class="mono">{{ result.asNumber }}</div>{% endif %}
+          {% if result.range %}<div>Range</div><div class="mono">{{ result.range }}</div>{% endif %}
+          {% if result.name %}<div>Name</div><div class="mono">{{ result.name }}</div>{% endif %}
+          {% if result.type %}<div>Type</div><div class="mono">{{ result.type }}</div>{% endif %}
+          {% if result.country %}<div>Country</div><div class="mono">{{ result.country }}</div>{% endif %}
+          {% if result.org %}<div>Org</div><div class="mono">{{ result.org }}</div>{% endif %}
+          {% if result.abuseContact.email %}<div>Abuse Email</div><div class="mono">{{ result.abuseContact.email }}</div>{% endif %}
+          {% if result.abuseContact.phone %}<div>Abuse Phone</div><div class="mono">{{ result.abuseContact.phone }}</div>{% endif %}
+        </div>
+      </div>
+    {% else %}
+      <div class="card mono">{{ result | tojson(indent=2) }}</div>
+    {% endif %}
+  {% endif %}
+</body>
+</html>
