@@ -213,13 +213,26 @@ async def api_rdap(q: str = Query(..., description="domena / IP / AS12345")):
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request, q: Optional[str] = None):
-    result = None; error = None
+    result = None
+    rdap_raw = None
+    error = None
     if q:
         try:
-            data = await _fetch_rdap(q.strip())
-            result = _normalize(data)
+            rdap_raw = await _fetch_rdap(q.strip())  # pełna odpowiedź RDAP (RAW)
+            result = _normalize(rdap_raw)            # Twoja normalizacja do estetycznego widoku
         except HTTPException as e:
             error = f"Błąd: {e.detail}"
         except Exception:
             error = "Wystąpił nieoczekiwany błąd"
-    return templates.TemplateResponse("index.html", {"request": request, "q": q or "", "result": result, "error": error})
+
+    # PRZEKAZUJEMY rdap_raw DO TEMPLATU, aby 'Surowe RDAP (JSON)' mogło pokazać pełną odpowiedź.
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "q": q or "",
+            "result": result,
+            "error": error,
+            "rdap_raw": rdap_raw,
+        },
+    )
