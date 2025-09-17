@@ -55,6 +55,19 @@
         {# ===== Podsumowanie do kopiowania (DOMAIN) ===== #}
         {% set L = [] %}
         {% macro add(label, val) -%}{% if val %}{% set _ = L.append(label ~ ": " ~ val) %}{% endif %}{%- endmacro %}
+
+        {# Złóż 'Registrant' jako jedna linia z przecinkami #}
+        {% set registrant_line = "" %}
+        {% if result.registrant %}
+          {% set Rreg = [] %}
+          {% if result.registrant.name %}{% set _ = Rreg.append(result.registrant.name) %}{% endif %}
+          {% if result.registrant.street %}{% set _ = Rreg.append(result.registrant.street) %}{% endif %}
+          {% if result.registrant.city %}{% set _ = Rreg.append(result.registrant.city) %}{% endif %}
+          {% if result.registrant.postal %}{% set _ = Rreg.append(result.registrant.postal) %}{% endif %}
+          {% if result.registrant.countryCode %}{% set _ = Rreg.append(result.registrant.countryCode) %}{% endif %}
+          {% set registrant_line = Rreg|join(", ") %}
+        {% endif %}
+
         {{ add("Domain Name", result.domainName) }}
         {{ add("Updated Date", result.updatedDate) }}
         {{ add("Creation Date", result.creationDate) }}
@@ -76,9 +89,10 @@
             {{ add("Name Server", ns) }}
           {% endfor %}
         {% endif %}
-        {% if result.registrant and result.registrant.formatted %}
-          {{ add("Registrant", result.registrant.formatted) }}
+        {% if registrant_line %}
+          {{ add("Registrant", registrant_line) }}
         {% endif %}
+
         <pre id="copy-summary-domain" style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden;">{{ L|join("\n") }}</pre>
         {# ===== /Podsumowanie (DOMAIN) ===== #}
 
@@ -112,10 +126,10 @@
             {% endfor %}
           {% endif %}
 
-          {# ==== Registrant (.PL) – wielolinijkowo ==== #}
-          {% if result.registrant and result.registrant.formatted %}
+          {# ==== Registrant (.PL) – JEDNA LINIA, PRZECINKAMI ==== #}
+          {% if registrant_line %}
             <div>Registrant</div>
-            <div class="mono" style="white-space:pre-line;">{{ result.registrant.formatted }}</div>
+            <div class="mono oneline">{{ registrant_line }}</div>
           {% endif %}
         </div>
 
