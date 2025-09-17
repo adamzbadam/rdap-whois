@@ -26,18 +26,32 @@ def _vcard(entity, field):
         pass
     return ""
 
-def _vcard_addr_str(entity) -> str:
+def _vcard_addr_parts(entity) -> Tuple[str, str, str, str, str, str]:
     """
-    Zwraca sformatowany adres z vCard 'adr' jako pojedynczy string:
-    'street, ext, locality, region, code, country' (bez pustych elementów).
+    Zwraca (street, ext, city, region, postal, country_name) z vCard 'adr'.
+    Jeśli brak 'adr' – zwraca puste stringi.
     """
     try:
         for item in entity["vcardArray"][1]:
             if item[0] == "adr":
                 adr = item[3] or []
                 po, ext, street, locality, region, code, country = (adr + [None]*7)[:7]
-                parts = [p for p in [street, ext, locality, region, code, country] if p]
-                return ", ".join(parts)
+                return (street or "", ext or "", locality or "", region or "", code or "", country or "")
+    except Exception:
+        pass
+    return ("", "", "", "", "", "")
+
+def _vcard_addr_cc(entity) -> str:
+    """
+    Zwraca country code z parametrów 'adr' (np. {'cc': 'PL'}) jeżeli jest.
+    """
+    try:
+        for item in entity["vcardArray"][1]:
+            if item[0] == "adr":
+                params = item[1] or {}
+                cc = params.get("cc")
+                if isinstance(cc, str) and cc:
+                    return cc
     except Exception:
         pass
     return ""
@@ -96,6 +110,49 @@ def _abuse_entity(entity):
             return e
     return None
 
+def _find_registrant_entity(entities):
+    for e in (entities or []):
+        if "registrant" in _roles(e):
+            return e
+    return None
+
+def _registrant_info_for_pl(entities) -> Dict[str, str]:
+    """
+    Zwraca słownik z informacjami o rejestrancie dla .PL:
+    {
+      'name': 'Interia.pl sp. z o.o.',
+      'street': 'Ul. Kotlarska 11',
+      'city': 'Kraków',
+      'postal': '31-539',
+      'countryCode': 'PL',
+      'formatted': 'Interia.pl sp. z o.o.\nUl. Kotlarska 11\nKraków\n31-539\nPL'
+    }
+    Jeśli nie znajdzie – zwraca {}.
+    """
+    ent = _find_registrant_entity(entities or [])
+    if not ent:
+        return {}
+    name = _vcard(ent, "fn") or ""
+    street, ext, city, region, postal, country_name = _vcard_addr_parts(ent)
+    cc = _vcard_addr_cc(ent) or ""
+    # Budujemy linie wg wzoru użytkownika
+    lines = []
+    if name: lines.append(name)
+    if street: lines.append(street)
+    if city: lines.append(city)
+    if postal: lines.append(postal)
+    if cc or country_name:
+        lines.append(cc or country_name)
+    formatted = "\n".join(lines)
+    return {
+        "name": name,
+        "street": street,
+        "city": city,
+        "postal": postal,
+        "countryCode": cc or "",
+        "formatted": formatted
+    }
+
 def _parse_domain(data: dict) -> dict:
     reg = _registrar_entity(data.get("entities") or [])
     reg_name = _vcard(reg, "fn") if reg else ""
@@ -133,9 +190,16 @@ def _parse_domain(data: dict) -> dict:
 
     dnssec = "signed" if data.get("secureDNS", {}).get("delegationSigned") else "unsigned"
 
+    # Czy to .PL?
+    dom = (data.get("ldhName") or data.get("unicodeName") or "")
+    is_pl = dom.lower().endswith(".pl")
+
+    # Registrant dla .PL
+    registrant = _registrant_info_for_pl(data.get("entities") or []) if is_pl else {}
+
     return {
         "objectClassName": "domain",
-        "domainName": (data.get("ldhName") or data.get("unicodeName") or "").upper(),
+        "domainName": (dom or "").upper(),
         "registryDomainId": data.get("handle") or "",
         "updatedDate": _event(data, "last changed"),
         "creationDate": _event(data, "registration"),
@@ -147,6 +211,7 @@ def _parse_domain(data: dict) -> dict:
         "nameServers": nameservers,
         "dnssec": dnssec,
         "abuseContact": {"email": abuse_email, "phone": abuse_tel},
+        "registrant": registrant,  # <-- NOWE
     }
 
 def _collect_status_list(data: dict) -> List[str]:
@@ -180,17 +245,14 @@ def _extract_mnt_fields_from_remarks(data: dict) -> Dict[str, List[str]]:
 def _extract_descr_and_geofeed(data: dict):
     descr_list: List[str] = []
     geofeed_url = ""
-    # 1) remarks lines
     for ln in _remarks_as_lines(data):
         if re.match(r'(?i)^geofeed\s*:\s*(\S+)$', ln):
             geofeed_url = re.sub(r'(?i)^geofeed\s*:\s*', '', ln).strip()
         if re.match(r'(?i)^descr\s*:\s*(.+)$', ln):
             descr_list.append(re.sub(r'(?i)^descr\s*:\s*', '', ln).strip())
-    # 2) links rel=geofeed
     for link in (data.get("links") or []):
         if link.get("rel") == "geofeed" and isinstance(link.get("href"), str):
             geofeed_url = link["href"]
-    # 3) fallback: remarks.title == description
     if not descr_list:
         for r in (data.get("remarks") or []):
             if (r.get("title") or "").lower() in ("description", "descr"):
@@ -199,41 +261,32 @@ def _extract_descr_and_geofeed(data: dict):
     return descr_list, geofeed_url
 
 def _org_info_from_entities(entities) -> Tuple[str, str, str]:
-    """
-    Zwraca (org_name, org_handle, org_address).
-    org_address pobieramy z pierwszego entity, które ma vCard adr;
-    preferujemy entity powiązane z organizacją (np. handle 'ORG-...').
-    """
     org_name = ""
     org_handle = ""
     org_address = ""
-
-    # najpierw zbierz kandydatów
     for e in (entities or []):
         r = _roles(e)
         h = e.get("handle") or ""
         fn = _vcard(e, "fn")
         if fn and not org_name:
             org_name = fn
-        # preferowane ORG/… albo ...-RIPE jako org handle
         if (h.startswith("ORG-") or "-RIPE" in h) and not org_handle:
             org_handle = h
-
-    # spróbuj znaleźć adres w entity org-handle
     if org_handle:
         for e in (entities or []):
             if e.get("handle") == org_handle:
-                org_address = _vcard_addr_str(e)
+                street, ext, city, region, postal, country_name = _vcard_addr_parts(e)
+                parts = [street, ext, city, region, postal, country_name]
+                org_address = ", ".join([p for p in parts if p])
                 if org_address:
                     break
-
-    # jeśli nie udało się, weź pierwszy z adresem
     if not org_address:
         for e in (entities or []):
-            org_address = _vcard_addr_str(e)
+            street, ext, city, region, postal, country_name = _vcard_addr_parts(e)
+            parts = [street, ext, city, region, postal, country_name]
+            org_address = ", ".join([p for p in parts if p])
             if org_address:
                 break
-
     return org_name, org_handle, org_address
 
 def _ip_version(data: dict) -> str:
@@ -244,7 +297,6 @@ def _ip_version(data: dict) -> str:
     return "v4" if sa else ""
 
 def _parse_ip(data: dict) -> dict:
-    # CIDR list or range
     cidrs: List[str] = []
     for c in (data.get("cidr0_cidrs") or []):
         length = c.get("length", 0)
@@ -252,42 +304,28 @@ def _parse_ip(data: dict) -> dict:
             cidrs.append(f"{c['v4prefix']}/{length}")
         elif c.get("v6prefix"):
             cidrs.append(f"{c['v6prefix']}/{length}")
-
     sa, ea = data.get("startAddress"), data.get("endAddress")
     ip_range = ""
     if sa and ea: ip_range = f"{sa} - {ea}"
-
     entities = data.get("entities") or []
     org_name, org_handle, org_addr = _org_info_from_entities(entities)
-
     abuse_email = ""; abuse_tel = ""
     for e in entities:
-        r = _roles(e)
-        if "abuse" in r:
+        if "abuse" in _roles(e):
             abuse_email = _vcard(e, "email") or abuse_email
             abuse_tel   = _vcard(e, "tel") or abuse_tel
-
-    # handlery ról
     def _first_handle_with_role(role_name: str) -> str:
         for e in (entities or []):
             if role_name in _roles(e):
                 h = e.get("handle")
                 if h: return h
         return ""
-
     admin_c = _first_handle_with_role("administrative")
     tech_c  = _first_handle_with_role("technical")
     abuse_c = _first_handle_with_role("abuse")
-
-    # mnt-* z remarks
     mnt = _extract_mnt_fields_from_remarks(data)
-
-    # descr i geofeed
     descr_list, geofeed_url = _extract_descr_and_geofeed(data)
-
-    # status (lista)
     statuses = _collect_status_list(data)
-
     return {
         "objectClassName": "ip network",
         "handle": data.get("handle", ""),
@@ -304,7 +342,7 @@ def _parse_ip(data: dict) -> dict:
         "status": statuses,
         "org": org_name,
         "orgHandle": org_handle,
-        "orgAddress": org_addr,  # <-- NOWE: sformatowany adres z vCard adr
+        "orgAddress": org_addr,
         "adminC": admin_c,
         "techC": tech_c,
         "abuseC": abuse_c,
@@ -334,11 +372,9 @@ def _parse_autnum(data: dict) -> dict:
         if "abuse" in r:
             abuse_email = _vcard(e, "email") or abuse_email
             abuse_tel   = _vcard(e, "tel") or abuse_tel
-
     rng = ""
     if data.get("startAutnum") and data.get("endAutnum"):
         rng = f"AS{data['startAutnum']} - AS{data['endAutnum']}"
-
     return {
         "objectClassName": "autnum",
         "asNumber": data.get("handle", ""),
@@ -372,8 +408,8 @@ async def home(request: Request, q: Optional[str] = None):
     error = None
     if q:
         try:
-            rdap_raw = await _fetch_rdap(q.strip())  # pełna odpowiedź RDAP (RAW)
-            result = _normalize(rdap_raw)            # normalizacja do widoku
+            rdap_raw = await _fetch_rdap(q.strip())
+            result = _normalize(rdap_raw)
         except HTTPException as e:
             error = f"Błąd: {e.detail}"
         except Exception:
