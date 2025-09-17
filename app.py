@@ -8,7 +8,11 @@ import httpx
 app = FastAPI(title="RDAP WHOIS")
 templates = Jinja2Templates(directory="templates")
 
-RDAP_HEADERS = {"Accept": "application/rdap+json, application/json"}
+USER_AGENT = "rdap-whois/1.0 (+https://github.com/adamzbadam/rdap-whois)"
+RDAP_HEADERS = {
+    "Accept": "application/rdap+json, application/json;q=0.9, */*;q=0.1",
+    "User-Agent": USER_AGENT,
+}
 
 def _roles(entity):
     r = entity.get("roles")
@@ -63,28 +67,107 @@ def _detect_kind(q: str) -> str:
         return "ip"
     return "domain"
 
+def _extract_rdap_error(json_obj: Dict) -> str:
+    """
+    Wyciąga możliwie czytelną wiadomość z odpowiedzi błędnej RDAP.
+    """
+    title = json_obj.get("title")
+    desc = None
+    if isinstance(json_obj.get("description"), list) and json_obj["description"]:
+        desc = json_obj["description"][0]
+    if isinstance(json_obj.get("notices"), list):
+        # czasem informacja jest w notices
+        for n in json_obj["notices"]:
+            ds = n.get("description") or []
+            for d in ds:
+                if isinstance(d, str) and d.strip():
+                    desc = desc or d.strip()
+                    break
+    parts = [p for p in [title, desc] if p]
+    return " — ".join(parts) if parts else "RDAP: obiekt nie znaleziony"
+
 async def _fetch_rdap(q: str) -> dict:
+    """
+    Pobiera RDAP dla domeny/IP/AS.
+    - Pierwszy strzał: rdap.org (bootstrap) — **śledzimy przekierowania** do rejestru.
+    - Dla domen: opcjonalny fallback do Identity Digital, jeśli pierwszy endpoint zwróci błąd (poza 404).
+    - 404 z JSON RDAP -> rzucamy HTTPException(404) z czytelnym opisem (to „nie istnieje”, nie błąd transportu).
+    """
     kind = _detect_kind(q)
-    urls = []
     if kind == "ip":
-        urls = [f"https://rdap.org/ip/{q}"]
+        primary = f"https://rdap.org/ip/{q}"
+        fallbacks: List[str] = []
     elif kind == "autnum":
         num = re.sub(r'(?i)^AS', '', q)
-        urls = [f"https://rdap.org/autnum/{num}"]
+        primary = f"https://rdap.org/autnum/{num}"
+        fallbacks = []
     else:
-        urls = [
-            f"https://rdap.org/domain/{q}",
-            f"https://rdap.identitydigital.services/rdap/domain/{q}",
-        ]
+        primary = f"https://rdap.org/domain/{q}"
+        # fallback sensowny głównie dla gTLD; dla ccTLD zwykle nic nie da,
+        # ale próbujemy jako opcja "ostatniej szansy", jeśli primary nie zwróci 404.
+        fallbacks = [f"https://rdap.identitydigital.services/rdap/domain/{q}"]
 
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-        for url in urls:
-            try:
-                r = await client.get(url, headers=RDAP_HEADERS)
-                if r.status_code < 400:
+    last_error: Optional[Tuple[int, str]] = None
+
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers=RDAP_HEADERS, http2=True) as client:
+        # 1) primary
+        try:
+            r = await client.get(primary)
+        except httpx.HTTPError as e:
+            last_error = (502, f"Błąd sieci: {e!s}")
+        else:
+            # 200..399 (po follow_redirects nie powinno być 3xx) -> zwrot JSON
+            if r.status_code < 400:
+                try:
                     return r.json()
-            except Exception:
+                except ValueError:
+                    raise HTTPException(status_code=502, detail="Błędny JSON z serwera RDAP")
+            # 404 -> „obiekt nie istnieje” z opisem z RDAP
+            if r.status_code == 404:
+                try:
+                    data = r.json()
+                    msg = _extract_rdap_error(data)
+                except ValueError:
+                    msg = "RDAP: obiekt nie znaleziony"
+                raise HTTPException(status_code=404, detail=msg)
+            # inne 4xx/5xx -> zapamiętaj błąd i spróbuj fallbacków
+            try:
+                data = r.json()
+                msg = _extract_rdap_error(data)
+                last_error = (r.status_code, msg)
+            except ValueError:
+                last_error = (r.status_code, f"RDAP HTTP {r.status_code}")
+
+        # 2) fallbacks (tylko domeny)
+        for url in fallbacks:
+            try:
+                r2 = await client.get(url)
+            except httpx.HTTPError:
                 continue
+            if r2.status_code < 400:
+                try:
+                    return r2.json()
+                except ValueError:
+                    raise HTTPException(status_code=502, detail="Błędny JSON z serwera RDAP (fallback)")
+            if r2.status_code == 404:
+                try:
+                    data = r2.json()
+                    msg = _extract_rdap_error(data)
+                except ValueError:
+                    msg = "RDAP: obiekt nie znaleziony"
+                raise HTTPException(status_code=404, detail=msg)
+            # zapisz ostatni błąd, ale kontynuuj ewentualne kolejne fallbacki
+            try:
+                data = r2.json()
+                msg = _extract_rdap_error(data)
+                last_error = (r2.status_code, msg)
+            except ValueError:
+                last_error = (r2.status_code, f"RDAP HTTP {r2.status_code}")
+
+    # Jeśli dotarliśmy tutaj – nic się nie udało
+    if last_error:
+        code, msg = last_error
+        raise HTTPException(status_code=code if 400 <= code < 600 else 502, detail=msg)
     raise HTTPException(status_code=502, detail="Nie udało się pobrać danych RDAP")
 
 def _event(data: dict, action: str) -> str:
