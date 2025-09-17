@@ -1,5 +1,5 @@
 import os, re
-from typing import Optional
+from typing import Optional, List, Dict
 from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -133,41 +133,158 @@ def _parse_domain(data: dict) -> dict:
         "abuseContact": {"email": abuse_email, "phone": abuse_tel},
     }
 
+def _collect_status_list(data: dict) -> List[str]:
+    st = data.get("status") or []
+    if isinstance(st, str): st = [st]
+    return st
+
+def _remarks_as_lines(data: dict) -> List[str]:
+    lines: List[str] = []
+    for r in (data.get("remarks") or []):
+        # remarks.description jest listą stringów
+        for d in (r.get("description") or []):
+            if isinstance(d, str):
+                for ln in d.splitlines():
+                    ln = ln.strip()
+                    if ln:
+                        lines.append(ln)
+    return lines
+
+def _extract_mnt_fields_from_remarks(data: dict) -> Dict[str, List[str]]:
+    # Szukamy w remarks linii w stylu: "mnt-by: something", "mnt-lower: x", itp.
+    wanted = ["mnt-by", "mnt-lower", "mnt-routes", "mnt-domains", "mnt-ref"]
+    acc: Dict[str, List[str]] = {k: [] for k in wanted}
+    for ln in _remarks_as_lines(data):
+        m = re.match(r'(?i)^(mnt-by|mnt-lower|mnt-routes|mnt-domains|mnt-ref)\s*:\s*(.+)$', ln)
+        if m:
+            key = m.group(1).lower()
+            val = m.group(2).strip()
+            if val and val not in acc[key]:
+                acc[key].append(val)
+    return acc
+
+def _extract_descr_and_geofeed(data: dict):
+    descr_list: List[str] = []
+    geofeed_url = ""
+    # 1) remarks lines
+    for ln in _remarks_as_lines(data):
+        if re.match(r'(?i)^geofeed\s*:\s*(\S+)$', ln):
+            geofeed_url = re.sub(r'(?i)^geofeed\s*:\s*', '', ln).strip()
+        # RPSL 'descr:' linie
+        if re.match(r'(?i)^descr\s*:\s*(.+)$', ln):
+            descr_list.append(re.sub(r'(?i)^descr\s*:\s*', '', ln).strip())
+    # 2) links rel=geofeed
+    for link in (data.get("links") or []):
+        if link.get("rel") == "geofeed" and isinstance(link.get("href"), str):
+            geofeed_url = link["href"]
+    # 3) fallback: remarks.title == "description"
+    if not descr_list:
+        for r in (data.get("remarks") or []):
+            if (r.get("title") or "").lower() in ("description", "descr"):
+                for d in (r.get("description") or []):
+                    if d: descr_list.append(d.strip())
+    return descr_list, geofeed_url
+
+def _first_handle_with_role(entities, role_name: str) -> str:
+    for e in (entities or []):
+        if role_name in _roles(e):
+            h = e.get("handle")
+            if h: return h
+    return ""
+
+def _org_info_from_entities(entities):
+    org_name = ""
+    org_handle = ""
+    for e in (entities or []):
+        r = _roles(e)
+        h = e.get("handle") or ""
+        # Szukaj czegoś w stylu ORG-XXX-YYYY
+        if (("registrant" in r) or ("administrative" in r) or ("technical" in r) or ("abuse" in r)) and (h.startswith("ORG-") or "-RIPE" in h):
+            org_handle = org_handle or h
+        fn = _vcard(e, "fn")
+        if fn and not org_name:
+            org_name = fn
+    return org_name, org_handle
+
+def _ip_version(data: dict) -> str:
+    v = data.get("ipVersion", "")
+    if v: return v
+    # fallback heurystyczny
+    sa = data.get("startAddress", "")
+    if ":" in sa: return "v6"
+    return "v4" if sa else ""
+
 def _parse_ip(data: dict) -> dict:
     # CIDR list or range
-    cidrs = []
+    cidrs: List[str] = []
     for c in (data.get("cidr0_cidrs") or []):
         length = c.get("length", 0)
         if c.get("v4prefix"):
             cidrs.append(f"{c['v4prefix']}/{length}")
         elif c.get("v6prefix"):
             cidrs.append(f"{c['v6prefix']}/{length}")
-    ip_range = ""
-    if not cidrs:
-        sa, ea = data.get("startAddress"), data.get("endAddress")
-        if sa and ea: ip_range = f"{sa} - {ea}"
 
-    org = ""; abuse_email = ""; abuse_tel = ""
-    for e in (data.get("entities") or []):
+    sa, ea = data.get("startAddress"), data.get("endAddress")
+    ip_range = ""
+    if sa and ea: ip_range = f"{sa} - {ea}"
+
+    entities = data.get("entities") or []
+    org_name, org_handle = _org_info_from_entities(entities)
+
+    abuse_email = ""; abuse_tel = ""
+    for e in entities:
         r = _roles(e)
-        if any(x in r for x in ["registrant", "administrative", "technical", "abuse"]):
-            fn = _vcard(e, "fn")
-            if fn and not org: org = fn
         if "abuse" in r:
             abuse_email = _vcard(e, "email") or abuse_email
             abuse_tel   = _vcard(e, "tel") or abuse_tel
 
+    # Kontakty: admin-c / tech-c / abuse-c (handlery)
+    admin_c = _first_handle_with_role(entities, "administrative")
+    tech_c  = _first_handle_with_role(entities, "technical")
+    abuse_c = _first_handle_with_role(entities, "abuse")
+
+    # mnt-* z remarks
+    mnt = _extract_mnt_fields_from_remarks(data)
+
+    # descr i geofeed
+    descr_list, geofeed_url = _extract_descr_and_geofeed(data)
+
+    # status (lista), typ, nazwa
+    statuses = _collect_status_list(data)
+
     return {
         "objectClassName": "ip network",
         "handle": data.get("handle", ""),
+        "parentHandle": data.get("parentHandle", ""),
         "cidr": ", ".join(cidrs) if cidrs else "",
         "range": ip_range,
-        "ipVersion": data.get("ipVersion", ""),
+        "startAddress": sa or "",
+        "endAddress": ea or "",
+        "prefix": cidrs[0] if cidrs else "",
+        "ipVersion": _ip_version(data),
         "name": data.get("name", ""),
         "type": data.get("type", ""),
         "country": data.get("country", ""),
-        "org": org,
+        "status": statuses,  # <-- nowość
+        "org": org_name,
+        "orgHandle": org_handle,
+        "adminC": admin_c,
+        "techC": tech_c,
+        "abuseC": abuse_c,
         "abuseContact": {"email": abuse_email, "phone": abuse_tel},
+        "mntBy": mnt.get("mnt-by") or [],
+        "mntLower": mnt.get("mnt-lower") or [],
+        "mntRoutes": mnt.get("mnt-routes") or [],
+        "mntDomains": mnt.get("mnt-domains") or [],
+        "mntRef": mnt.get("mnt-ref") or [],
+        "descr": descr_list,
+        "geofeed": geofeed_url,
+        "updatedDate": _event(data, "last changed"),
+        "creationDate": _event(data, "registration"),
+        "events": data.get("events") or [],
+        "entities": entities,  # przekażemy dalej (do ewentualnego rozwoju w templacie)
+        "links": data.get("links") or [],
+        "remarks": data.get("remarks") or [],
     }
 
 def _parse_autnum(data: dict) -> dict:
@@ -225,7 +342,6 @@ async def home(request: Request, q: Optional[str] = None):
         except Exception:
             error = "Wystąpił nieoczekiwany błąd"
 
-    # PRZEKAZUJEMY rdap_raw DO TEMPLATU, aby 'Surowe RDAP (JSON)' mogło pokazać pełną odpowiedź.
     return templates.TemplateResponse(
         "index.html",
         {
