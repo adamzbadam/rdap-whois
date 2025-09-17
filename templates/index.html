@@ -5,19 +5,32 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>RDAP WHOIS</title>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; }
+    :root { --border:#ddd; --muted:#666; --bg:#f6f8fa; }
+    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin: 2rem; }
     form { display:flex; gap:.5rem; margin-bottom:1rem; }
     input[type=text]{ flex:1; padding:.6rem; font-size:1rem; }
     button{ padding:.6rem 1rem; font-size:1rem; cursor:pointer; }
-    .card{ border:1px solid #ddd; border-radius:8px; padding:1rem; }
-    .muted{ color:#666; font-size:.9rem; }
-    code { background:#f6f8fa; padding:.15rem .35rem; border-radius:4px; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; white-space: pre-line; }
+    .card{ border:1px solid var(--border); border-radius:8px; padding:1rem; }
+    .muted{ color:var(--muted); font-size:.9rem; }
+    code { background:var(--bg); padding:.15rem .35rem; border-radius:4px; }
+    .mono { font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace; white-space: pre-line; }
     .kv { display:grid; grid-template-columns: 220px 1fr; gap:.35rem .75rem; margin:.5rem 0; }
     .kv div:nth-child(odd){ color:#555; }
     hr { border:0; border-top:1px solid #eee; margin:1rem 0; }
     a { text-decoration: none; }
     a:hover { text-decoration: underline; }
+    .section{ margin:1rem 0; }
+    details { border:1px solid var(--border); border-radius:8px; padding:.6rem .8rem; background: #fff; }
+    details>summary{ cursor:pointer; font-weight:600; }
+    .pill{ display:inline-block; border:1px solid var(--border); border-radius:999px; padding:.05rem .5rem; font-size:.85rem; margin:.1rem .25rem 0 0; }
+    .stack{ display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; }
+    .copy{ font-size:.85rem; border:1px solid var(--border); border-radius:6px; padding:.2rem .5rem; background:#fff; cursor:pointer; }
+    .small{ font-size:.95rem; }
+    .grid2{ display:grid; grid-template-columns: 1fr 1fr; gap:.6rem .8rem; }
+    @media (max-width:800px){ .kv{grid-template-columns: 1fr}; .grid2{grid-template-columns:1fr} }
+    .kvt{ display:grid; grid-template-columns: 180px 1fr; gap:.25rem .6rem; }
+    .tag{font-size:.8rem; background:var(--bg); border:1px solid var(--border); border-radius:4px; padding:.05rem .35rem; }
+    .notice{ background:#fffdf5; border:1px solid #f3e5ab; }
   </style>
 </head>
 <body>
@@ -34,54 +47,278 @@
   {% endif %}
 
   {% if result %}
-    {% if result.objectClassName == "domain" %}
+    {% set ocn = result.objectClassName %}
+    {% macro copy_btn(val) -%}
+      <button class="copy" data-copy="{{ val|e }}" title="Kopiuj">Kopiuj</button>
+    {%- endmacro %}
+
+    {% if ocn == "domain" %}
       <div class="card">
         <div class="kv">
-          <div>Domain Name</div><div class="mono">{{ result.domainName }}</div>
-          {% if result.registryDomainId %}<div>Registry Domain ID</div><div class="mono">{{ result.registryDomainId }}</div>{% endif %}
+          <div>Domain Name</div><div class="mono stack">{{ result.domainName }} {{ copy_btn(result.domainName) }}</div>
+          {% if result.registryDomainId %}<div>Registry Domain ID</div><div class="mono stack">{{ result.registryDomainId }} {{ copy_btn(result.registryDomainId) }}</div>{% endif %}
           {% if result.updatedDate %}<div>Updated Date</div><div class="mono">{{ result.updatedDate }}</div>{% endif %}
           {% if result.creationDate %}<div>Creation Date</div><div class="mono">{{ result.creationDate }}</div>{% endif %}
-          {% if result.expiryDate %}<div>Registry Expiry Date</div><div class="mono">{{ result.expiryDate }}</div>{% endif %}
+          {% if result.expiryDate %}
+            {% set days = result.expiryDaysLeft if result.expiryDaysLeft is not none else '' %}
+            <div>Registry Expiry Date</div>
+            <div class="mono">
+              {{ result.expiryDate }}
+              {% if days is string or days is number %}
+                <span class="pill">za {{ days }} dni</span>
+              {% endif %}
+            </div>
+          {% endif %}
           {% if result.registrar %}<div>Registrar</div><div class="mono">{{ result.registrar }}</div>{% endif %}
           {% if result.registrarIanaId %}<div>Registrar IANA ID</div><div class="mono">{{ result.registrarIanaId }}</div>{% endif %}
           {% if result.registrarUrl %}<div>Registrar URL</div><div class="mono"><a href="{{ result.registrarUrl }}" target="_blank" rel="noopener">{{ result.registrarUrl }}</a></div>{% endif %}
           <div>DNSSEC</div><div class="mono">{{ result.dnssec }}</div>
-          {% if result.abuseContact.email %}<div>Registrar Abuse Contact Email</div><div class="mono">{{ result.abuseContact.email }}</div>{% endif %}
+          {% if result.abuseContact.email %}<div>Registrar Abuse Contact Email</div><div class="mono"><a href="mailto:{{ result.abuseContact.email }}">{{ result.abuseContact.email }}</a></div>{% endif %}
           {% if result.abuseContact.phone %}<div>Registrar Abuse Contact Phone</div><div class="mono">{{ result.abuseContact.phone }}</div>{% endif %}
 
-          {# Domain Status jako zwykłe wiersze — jedna linia #}
           {% if result.statuses and result.statuses|length %}
             {% for st in result.statuses %}
-              <div>Domain Status</div><div class="mono">{{ st.raw }} — <a href="https://icann.org/epp#{{ st.epp }}" target="_blank" rel="noopener">https://icann.org/epp#{{ st.epp }}</a></div>
+              <div>Domain Status</div>
+              <div class="mono">
+                {{ st.raw }}
+                — <a href="https://icann.org/epp#{{ st.epp }}" target="_blank" rel="noopener">https://icann.org/epp#{{ st.epp }}</a>
+              </div>
             {% endfor %}
           {% endif %}
 
-          {# Name Server jako zwykłe wiersze #}
           {% if result.nameServers and result.nameServers|length %}
             {% for ns in result.nameServers %}
               <div>Name Server</div><div class="mono">{{ ns }}</div>
             {% endfor %}
           {% endif %}
         </div>
+
+        {# Name server objects z adresami IP (jeśli backend je daje) #}
+        {% if result.nameServerObjects and result.nameServerObjects|length %}
+          <div class="section">
+            <details open>
+              <summary>Nameservery (z adresami)</summary>
+              <div class="kv small" style="margin-top:.5rem;">
+                {% for nso in result.nameServerObjects %}
+                  <div>Name Server</div>
+                  <div class="mono">
+                    {{ nso.name }}
+                    {% if nso.ipv4 and nso.ipv4|length %}<div class="muted">IPv4: {{ nso.ipv4|join(', ') }}</div>{% endif %}
+                    {% if nso.ipv6 and nso.ipv6|length %}<div class="muted">IPv6: {{ nso.ipv6|join(', ') }}</div>{% endif %}
+                  </div>
+                {% endfor %}
+              </div>
+            </details>
+          </div>
+        {% endif %}
+
+        {# Entities / contacts #}
+        {% if result.entities and result.entities|length %}
+          <div class="section">
+            <details>
+              <summary>Kontakty / Entities</summary>
+              <div style="margin-top:.5rem;">
+                {% for e in result.entities %}
+                  <div class="section" style="margin:.5rem 0;">
+                    <div class="stack">
+                      <span class="tag">{{ (e.roles or [])|join(', ') }}</span>
+                      {% if e.handle %}<span class="tag">handle: {{ e.handle }}</span>{% endif %}
+                    </div>
+                    <div class="kvt mono small" style="margin-top:.35rem;">
+                      {% if e.vcard %}
+                        {% if e.vcard.fn %}<div>Name</div><div>{{ e.vcard.fn }}</div>{% endif %}
+                        {% if e.vcard.org %}<div>Org</div><div>{{ e.vcard.org }}</div>{% endif %}
+                        {% if e.vcard.email %}<div>Email</div><div><a href="mailto:{{ e.vcard.email }}">{{ e.vcard.email }}</a></div>{% endif %}
+                        {% if e.vcard.tel %}<div>Phone</div><div>{{ e.vcard.tel }}</div>{% endif %}
+                        {% if e.vcard.addr %}
+                          <div>Address</div>
+                          <div>
+                            {{ e.vcard.addr.street or '' }} {{ e.vcard.addr.ext or '' }}<br>
+                            {{ e.vcard.addr.postal or '' }} {{ e.vcard.addr.city or '' }} {{ e.vcard.addr.region or '' }} {{ e.vcard.addr.country or '' }}
+                          </div>
+                        {% endif %}
+                      {% endif %}
+                    </div>
+                  </div>
+                  <hr>
+                {% endfor %}
+              </div>
+            </details>
+          </div>
+        {% endif %}
+
+        {# DNSSEC / secureDNS #}
+        {% if result.secureDNS %}
+          <div class="section">
+            <details>
+              <summary>DNSSEC / secureDNS</summary>
+              <div class="kv mono small" style="margin-top:.5rem;">
+                {% if result.secureDNS.delegationSigned is not none %}<div>Delegation Signed</div><div>{{ result.secureDNS.delegationSigned }}</div>{% endif %}
+                {% if result.secureDNS.maxSigLife %}<div>Max Sig Life</div><div>{{ result.secureDNS.maxSigLife }}</div>{% endif %}
+              </div>
+              {% if result.secureDNS.dsData and result.secureDNS.dsData|length %}
+                <div class="section">
+                  <b>DS Records</b>
+                  <div class="kv mono small">
+                    {% for ds in result.secureDNS.dsData %}
+                      <div>Key Tag</div><div>{{ ds.keyTag }}</div>
+                      <div>Algorithm</div><div>{{ ds.algorithm }}</div>
+                      <div>Digest Type</div><div>{{ ds.digestType }}</div>
+                      <div>Digest</div><div class="mono">{{ ds.digest }}</div>
+                      <hr>
+                    {% endfor %}
+                  </div>
+                </div>
+              {% endif %}
+              {% if result.secureDNS.keyData and result.secureDNS.keyData|length %}
+                <div class="section">
+                  <b>DNSKEY</b>
+                  <div class="kv mono small">
+                    {% for kd in result.secureDNS.keyData %}
+                      <div>Flags</div><div>{{ kd.flags }}</div>
+                      <div>Protocol</div><div>{{ kd.protocol }}</div>
+                      <div>Algorithm</div><div>{{ kd.algorithm }}</div>
+                      <div>Public Key</div><div class="mono">{{ kd.publicKey }}</div>
+                      <hr>
+                    {% endfor %}
+                  </div>
+                </div>
+              {% endif %}
+            </details>
+          </div>
+        {% endif %}
+
+        {# Events #}
+        {% if result.events and result.events|length %}
+          <div class="section">
+            <details>
+              <summary>Wydarzenia (events)</summary>
+              <div class="kv mono small" style="margin-top:.5rem;">
+                {% for ev in result.events %}
+                  <div>{{ ev.eventAction|capitalize }}</div><div>{{ ev.eventDate }}</div>
+                {% endfor %}
+              </div>
+            </details>
+          </div>
+        {% endif %}
+
+        {# Links + notices + remarks #}
+        {% if result.links and result.links|length %}
+          <div class="section">
+            <details>
+              <summary>Linki RDAP</summary>
+              <div class="mono small" style="margin-top:.5rem;">
+                <ul>
+                  {% for l in result.links %}
+                    <li><span class="tag">{{ l.rel or 'link' }}</span> <a href="{{ l.href }}" target="_blank" rel="noopener">{{ l.href }}</a></li>
+                  {% endfor %}
+                </ul>
+              </div>
+            </details>
+          </div>
+        {% endif %}
+
+        {% if result.notices and result.notices|length %}
+          <div class="section">
+            <details>
+              <summary>Notices</summary>
+              <div class="notice small" style="margin-top:.5rem; padding:.6rem .8rem; border-radius:6px;">
+                {% for n in result.notices %}
+                  <div style="margin:.3rem 0;">
+                    <b>{{ n.title }}</b><br>
+                    <span class="muted">{{ (n.description or [])|join(' ') }}</span>
+                  </div>
+                  {% if not loop.last %}<hr>{% endif %}
+                {% endfor %}
+              </div>
+            </details>
+          </div>
+        {% endif %}
+
+        {% if result.remarks and result.remarks|length %}
+          <div class="section">
+            <details>
+              <summary>Remarks</summary>
+              <div class="small" style="margin-top:.5rem;">
+                {% for r in result.remarks %}
+                  <div style="margin:.3rem 0;">
+                    <b>{{ r.title }}</b><br>
+                    <span class="muted">{{ (r.description or [])|join(' ') }}</span>
+                  </div>
+                  {% if not loop.last %}<hr>{% endif %}
+                {% endfor %}
+              </div>
+            </details>
+          </div>
+        {% endif %}
+
+        <div class="section">
+          <details>
+            <summary>Pokaż surowe RDAP (JSON)</summary>
+            <pre class="mono" style="white-space:pre-wrap;">{{ result | tojson(indent=2) }}</pre>
+          </details>
+        </div>
       </div>
 
-    {% elif result.objectClassName == "ip network" %}
+    {% elif ocn == "ip network" %}
       <div class="card">
         <div class="kv">
           {% if result.handle %}<div>Network</div><div class="mono">{{ result.handle }}</div>{% endif %}
           {% if result.cidr %}<div>CIDR</div><div class="mono">{{ result.cidr }}</div>{% endif %}
           {% if result.range %}<div>Range</div><div class="mono">{{ result.range }}</div>{% endif %}
+          {% if result.startAddress %}<div>Start</div><div class="mono">{{ result.startAddress }}</div>{% endif %}
+          {% if result.endAddress %}<div>End</div><div class="mono">{{ result.endAddress }}</div>{% endif %}
+          {% if result.prefix %}<div>Prefix</div><div class="mono">{{ result.prefix }}</div>{% endif %}
           {% if result.ipVersion %}<div>Version</div><div class="mono">{{ result.ipVersion }}</div>{% endif %}
           {% if result.name %}<div>Name</div><div class="mono">{{ result.name }}</div>{% endif %}
           {% if result.type %}<div>Type</div><div class="mono">{{ result.type }}</div>{% endif %}
           {% if result.country %}<div>Country</div><div class="mono">{{ result.country }}</div>{% endif %}
+          {% if result.parentHandle %}<div>Parent</div><div class="mono">{{ result.parentHandle }}</div>{% endif %}
           {% if result.org %}<div>Org</div><div class="mono">{{ result.org }}</div>{% endif %}
-          {% if result.abuseContact.email %}<div>Abuse Email</div><div class="mono">{{ result.abuseContact.email }}</div>{% endif %}
+          {% if result.status and result.status|length %}<div>Status</div><div class="mono">{{ result.status|join(', ') }}</div>{% endif %}
+          {% if result.abuseContact.email %}<div>Abuse Email</div><div class="mono"><a href="mailto:{{ result.abuseContact.email }}">{{ result.abuseContact.email }}</a></div>{% endif %}
           {% if result.abuseContact.phone %}<div>Abuse Phone</div><div class="mono">{{ result.abuseContact.phone }}</div>{% endif %}
+        </div>
+
+        {% if result.entities and result.entities|length %}
+          <div class="section">
+            <details>
+              <summary>Entities</summary>
+              <div class="kvt mono small" style="margin-top:.5rem;">
+                {% for e in result.entities %}
+                  <div>Roles</div><div>{{ (e.roles or [])|join(', ') }}</div>
+                  {% if e.handle %}<div>Handle</div><div>{{ e.handle }}</div>{% endif %}
+                  {% if e.vcard and e.vcard.fn %}<div>Name</div><div>{{ e.vcard.fn }}</div>{% endif %}
+                  {% if e.vcard and e.vcard.email %}<div>Email</div><div><a href="mailto:{{ e.vcard.email }}">{{ e.vcard.email }}</a></div>{% endif %}
+                  <hr>
+                {% endfor %}
+              </div>
+            </details>
+          </div>
+        {% endif %}
+
+        {% if result.events and result.events|length %}
+          <div class="section">
+            <details>
+              <summary>Events</summary>
+              <div class="kv mono small" style="margin-top:.5rem;">
+                {% for ev in result.events %}
+                  <div>{{ ev.eventAction|capitalize }}</div><div>{{ ev.eventDate }}</div>
+                {% endfor %}
+              </div>
+            </details>
+          </div>
+        {% endif %}
+
+        <div class="section">
+          <details>
+            <summary>Pokaż surowe RDAP (JSON)</summary>
+            <pre class="mono" style="white-space:pre-wrap;">{{ result | tojson(indent=2) }}</pre>
+          </details>
         </div>
       </div>
 
-    {% elif result.objectClassName == "autnum" %}
+    {% elif ocn == "autnum" %}
       <div class="card">
         <div class="kv">
           {% if result.asNumber %}<div>ASNumber</div><div class="mono">{{ result.asNumber }}</div>{% endif %}
@@ -90,8 +327,46 @@
           {% if result.type %}<div>Type</div><div class="mono">{{ result.type }}</div>{% endif %}
           {% if result.country %}<div>Country</div><div class="mono">{{ result.country }}</div>{% endif %}
           {% if result.org %}<div>Org</div><div class="mono">{{ result.org }}</div>{% endif %}
-          {% if result.abuseContact.email %}<div>Abuse Email</div><div class="mono">{{ result.abuseContact.email }}</div>{% endif %}
+          {% if result.status and result.status|length %}<div>Status</div><div class="mono">{{ result.status|join(', ') }}</div>{% endif %}
+          {% if result.abuseContact.email %}<div>Abuse Email</div><div class="mono"><a href="mailto:{{ result.abuseContact.email }}">{{ result.abuseContact.email }}</a></div>{% endif %}
           {% if result.abuseContact.phone %}<div>Abuse Phone</div><div class="mono">{{ result.abuseContact.phone }}</div>{% endif %}
+        </div>
+
+        {% if result.entities and result.entities|length %}
+          <div class="section">
+            <details>
+              <summary>Entities</summary>
+              <div class="kvt mono small" style="margin-top:.5rem;">
+                {% for e in result.entities %}
+                  <div>Roles</div><div>{{ (e.roles or [])|join(', ') }}</div>
+                  {% if e.handle %}<div>Handle</div><div>{{ e.handle }}</div>{% endif %}
+                  {% if e.vcard and e.vcard.fn %}<div>Name</div><div>{{ e.vcard.fn }}</div>{% endif %}
+                  {% if e.vcard and e.vcard.email %}<div>Email</div><div><a href="mailto:{{ e.vcard.email }}">{{ e.vcard.email }}</a></div>{% endif %}
+                  <hr>
+                {% endfor %}
+              </div>
+            </details>
+          </div>
+        {% endif %}
+
+        {% if result.events and result.events|length %}
+          <div class="section">
+            <details>
+              <summary>Events</summary>
+              <div class="kv mono small" style="margin-top:.5rem;">
+                {% for ev in result.events %}
+                  <div>{{ ev.eventAction|capitalize }}</div><div>{{ ev.eventDate }}</div>
+                {% endfor %}
+              </div>
+            </details>
+          </div>
+        {% endif %}
+
+        <div class="section">
+          <details>
+            <summary>Pokaż surowe RDAP (JSON)</summary>
+            <pre class="mono" style="white-space:pre-wrap;">{{ result | tojson(indent=2) }}</pre>
+          </details>
         </div>
       </div>
 
@@ -99,5 +374,20 @@
       <div class="card mono">{{ result | tojson(indent=2) }}</div>
     {% endif %}
   {% endif %}
+
+  <script>
+    // Kopiowanie do schowka
+    document.addEventListener('click', (e)=>{
+      const btn = e.target.closest('.copy');
+      if(!btn) return;
+      const v = btn.getAttribute('data-copy');
+      if(!v) return;
+      navigator.clipboard.writeText(v).then(()=>{
+        const old = btn.textContent;
+        btn.textContent = 'Skopiowano';
+        setTimeout(()=>{ btn.textContent = old; }, 1200);
+      });
+    });
+  </script>
 </body>
 </html>
