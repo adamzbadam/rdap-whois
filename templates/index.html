@@ -76,6 +76,9 @@
             {{ add("Name Server", ns) }}
           {% endfor %}
         {% endif %}
+        {% if result.registrant and result.registrant.formatted %}
+          {{ add("Registrant", result.registrant.formatted) }}
+        {% endif %}
         <pre id="copy-summary-domain" style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden;">{{ L|join("\n") }}</pre>
         {# ===== /Podsumowanie (DOMAIN) ===== #}
 
@@ -107,6 +110,12 @@
             {% for ns in result.nameServers %}
               <div>Name Server</div><div class="mono">{{ ns }}</div>
             {% endfor %}
+          {% endif %}
+
+          {# ==== Registrant (.PL) – wielolinijkowo ==== #}
+          {% if result.registrant and result.registrant.formatted %}
+            <div>Registrant</div>
+            <div class="mono" style="white-space:pre-line;">{{ result.registrant.formatted }}</div>
           {% endif %}
         </div>
 
