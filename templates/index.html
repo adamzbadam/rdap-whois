@@ -124,14 +124,17 @@
         {# ===== Podsumowanie do kopiowania (IP) ===== #}
         {% set LIP = [] %}
         {% macro addip(label, val) -%}{% if val %}{% set _ = LIP.append(label ~ ": " ~ (val if val is string else val)) %}{% endif %}{%- endmacro %}
-        {{ addip("Network", (result.range or result.handle)) }}
+        {{ addip("Network", (result.handle or result.cidr or result.range)) }}
         {{ addip("CIDR", result.cidr) }}
+        {{ addip("Prefix", result.prefix) }}
         {{ addip("Version", result.ipVersion) }}
         {{ addip("Name", result.name) }}
         {{ addip("Type", result.type) }}
         {{ addip("Country", result.country) }}
+        {{ addip("Parent", result.parentHandle) }}
         {{ addip("Org", result.org) }}
         {{ addip("Org Handle", result.orgHandle) }}
+        {{ addip("Address", result.orgAddress) }}
         {% if result.status and result.status|length %}{% for s in result.status %}{{ addip("Status", s) }}{% endfor %}{% endif %}
         {% if result.adminC %}{{ addip("admin-c", result.adminC) }}{% endif %}
         {% if result.techC %}{{ addip("tech-c", result.techC) }}{% endif %}
@@ -153,14 +156,11 @@
         <div class="kv">
           <div>Network</div>
           <div class="mono stack">
-            {{ result.handle or (result.range) }}
+            {{ result.handle or result.cidr or result.range }}
             <button class="copy" data-copy-target="#copy-summary-ip" title="Kopiuj całe podsumowanie">Kopiuj</button>
           </div>
 
           {% if result.cidr %}<div>CIDR</div><div class="mono">{{ result.cidr }}</div>{% endif %}
-          {% if result.range %}<div>Range</div><div class="mono">{{ result.range }}</div>{% endif %}
-          {% if result.startAddress %}<div>Start</div><div class="mono">{{ result.startAddress }}</div>{% endif %}
-          {% if result.endAddress %}<div>End</div><div class="mono">{{ result.endAddress }}</div>{% endif %}
           {% if result.prefix %}<div>Prefix</div><div class="mono">{{ result.prefix }}</div>{% endif %}
           {% if result.ipVersion %}<div>Version</div><div class="mono">{{ result.ipVersion }}</div>{% endif %}
           {% if result.name %}<div>Name</div><div class="mono">{{ result.name }}</div>{% endif %}
@@ -169,6 +169,7 @@
           {% if result.parentHandle %}<div>Parent</div><div class="mono">{{ result.parentHandle }}</div>{% endif %}
           {% if result.org %}<div>Org</div><div class="mono">{{ result.org }}</div>{% endif %}
           {% if result.orgHandle %}<div>Org Handle</div><div class="mono">{{ result.orgHandle }}</div>{% endif %}
+          {% if result.orgAddress %}<div>Address</div><div class="mono">{{ result.orgAddress }}</div>{% endif %}
           {% if result.status and result.status|length %}<div>Status</div><div class="mono">{{ result.status|join(', ') }}</div>{% endif %}
 
           {% if result.adminC %}<div>admin-c</div><div class="mono">{{ result.adminC }}</div>{% endif %}
