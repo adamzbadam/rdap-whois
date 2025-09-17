@@ -52,11 +52,9 @@
 
     {% if ocn == "domain" %}
       <div class="card">
-
-        {# ===== Podsumowanie do kopiowania (hidden) ===== #}
+        {# ===== Podsumowanie do kopiowania (DOMAIN) ===== #}
         {% set L = [] %}
         {% macro add(label, val) -%}{% if val %}{% set _ = L.append(label ~ ": " ~ val) %}{% endif %}{%- endmacro %}
-
         {{ add("Domain Name", result.domainName) }}
         {{ add("Updated Date", result.updatedDate) }}
         {{ add("Creation Date", result.creationDate) }}
@@ -67,28 +65,25 @@
         {{ add("DNSSEC", result.dnssec) }}
         {{ add("Registrar Abuse Contact Email", result.abuseContact.email) }}
         {{ add("Registrar Abuse Contact Phone", result.abuseContact.phone) }}
-
         {% if result.statuses %}
           {% for st in result.statuses %}
             {% set line = (st.raw ~ " — https://icann.org/epp#" ~ st.epp) %}
             {{ add("Domain Status", line) }}
           {% endfor %}
         {% endif %}
-
         {% if result.nameServers %}
           {% for ns in result.nameServers %}
             {{ add("Name Server", ns) }}
           {% endfor %}
         {% endif %}
-
-        <pre id="copy-summary" style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden;">{{ L|join("\n") }}</pre>
-        {# ===== /Podsumowanie do kopiowania ===== #}
+        <pre id="copy-summary-domain" style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden;">{{ L|join("\n") }}</pre>
+        {# ===== /Podsumowanie (DOMAIN) ===== #}
 
         <div class="kv">
           <div>Domain Name</div>
           <div class="mono stack">
             {{ result.domainName }}
-            <button class="copy" data-copy-target="#copy-summary" title="Kopiuj całe podsumowanie">Kopiuj</button>
+            <button class="copy" data-copy-target="#copy-summary-domain" title="Kopiuj całe podsumowanie">Kopiuj</button>
           </div>
           {% if result.registryDomainId %}<div>Registry Domain ID</div><div class="mono">{{ result.registryDomainId }}</div>{% endif %}
           {% if result.updatedDate %}<div>Updated Date</div><div class="mono">{{ result.updatedDate }}</div>{% endif %}
@@ -125,18 +120,82 @@
 
     {% elif ocn == "ip network" %}
       <div class="card">
+
+        {# ===== Podsumowanie do kopiowania (IP) ===== #}
+        {% set LIP = [] %}
+        {% macro addip(label, val) -%}{% if val %}{% set _ = LIP.append(label ~ ": " ~ (val if val is string else val)) %}{% endif %}{%- endmacro %}
+        {{ addip("Network", (result.range or result.handle)) }}
+        {{ addip("CIDR", result.cidr) }}
+        {{ addip("Version", result.ipVersion) }}
+        {{ addip("Name", result.name) }}
+        {{ addip("Type", result.type) }}
+        {{ addip("Country", result.country) }}
+        {{ addip("Org", result.org) }}
+        {{ addip("Org Handle", result.orgHandle) }}
+        {% if result.status and result.status|length %}{% for s in result.status %}{{ addip("Status", s) }}{% endfor %}{% endif %}
+        {% if result.adminC %}{{ addip("admin-c", result.adminC) }}{% endif %}
+        {% if result.techC %}{{ addip("tech-c", result.techC) }}{% endif %}
+        {% if result.abuseC %}{{ addip("abuse-c", result.abuseC) }}{% endif %}
+        {% if result.mntBy and result.mntBy|length %}{{ addip("mnt-by", result.mntBy|join(', ')) }}{% endif %}
+        {% if result.mntLower and result.mntLower|length %}{{ addip("mnt-lower", result.mntLower|join(', ')) }}{% endif %}
+        {% if result.mntRoutes and result.mntRoutes|length %}{{ addip("mnt-routes", result.mntRoutes|join(', ')) }}{% endif %}
+        {% if result.mntDomains and result.mntDomains|length %}{{ addip("mnt-domains", result.mntDomains|join(', ')) }}{% endif %}
+        {% if result.mntRef and result.mntRef|length %}{{ addip("mnt-ref", result.mntRef|join(', ')) }}{% endif %}
+        {% if result.descr and result.descr|length %}{% for d in result.descr %}{{ addip("descr", d) }}{% endfor %}{% endif %}
+        {{ addip("Geofeed", result.geofeed) }}
+        {{ addip("Created", result.creationDate) }}
+        {{ addip("Last-Modified", result.updatedDate) }}
+        {{ addip("Abuse Email", result.abuseContact.email) }}
+        {{ addip("Abuse Phone", result.abuseContact.phone) }}
+        <pre id="copy-summary-ip" style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden;">{{ LIP|join("\n") }}</pre>
+        {# ===== /Podsumowanie (IP) ===== #}
+
         <div class="kv">
-          {% if result.handle %}<div>Network</div><div class="mono">{{ result.handle }}</div>{% endif %}
+          <div>Network</div>
+          <div class="mono stack">
+            {{ result.handle or (result.range) }}
+            <button class="copy" data-copy-target="#copy-summary-ip" title="Kopiuj całe podsumowanie">Kopiuj</button>
+          </div>
+
           {% if result.cidr %}<div>CIDR</div><div class="mono">{{ result.cidr }}</div>{% endif %}
           {% if result.range %}<div>Range</div><div class="mono">{{ result.range }}</div>{% endif %}
+          {% if result.startAddress %}<div>Start</div><div class="mono">{{ result.startAddress }}</div>{% endif %}
+          {% if result.endAddress %}<div>End</div><div class="mono">{{ result.endAddress }}</div>{% endif %}
+          {% if result.prefix %}<div>Prefix</div><div class="mono">{{ result.prefix }}</div>{% endif %}
           {% if result.ipVersion %}<div>Version</div><div class="mono">{{ result.ipVersion }}</div>{% endif %}
           {% if result.name %}<div>Name</div><div class="mono">{{ result.name }}</div>{% endif %}
           {% if result.type %}<div>Type</div><div class="mono">{{ result.type }}</div>{% endif %}
           {% if result.country %}<div>Country</div><div class="mono">{{ result.country }}</div>{% endif %}
+          {% if result.parentHandle %}<div>Parent</div><div class="mono">{{ result.parentHandle }}</div>{% endif %}
           {% if result.org %}<div>Org</div><div class="mono">{{ result.org }}</div>{% endif %}
+          {% if result.orgHandle %}<div>Org Handle</div><div class="mono">{{ result.orgHandle }}</div>{% endif %}
+          {% if result.status and result.status|length %}<div>Status</div><div class="mono">{{ result.status|join(', ') }}</div>{% endif %}
+
+          {% if result.adminC %}<div>admin-c</div><div class="mono">{{ result.adminC }}</div>{% endif %}
+          {% if result.techC %}<div>tech-c</div><div class="mono">{{ result.techC }}</div>{% endif %}
+          {% if result.abuseC %}<div>abuse-c</div><div class="mono">{{ result.abuseC }}</div>{% endif %}
+
+          {% if result.mntBy and result.mntBy|length %}<div>mnt-by</div><div class="mono">{{ result.mntBy|join(', ') }}</div>{% endif %}
+          {% if result.mntLower and result.mntLower|length %}<div>mnt-lower</div><div class="mono">{{ result.mntLower|join(', ') }}</div>{% endif %}
+          {% if result.mntRoutes and result.mntRoutes|length %}<div>mnt-routes</div><div class="mono">{{ result.mntRoutes|join(', ') }}</div>{% endif %}
+          {% if result.mntDomains and result.mntDomains|length %}<div>mnt-domains</div><div class="mono">{{ result.mntDomains|join(', ') }}</div>{% endif %}
+          {% if result.mntRef and result.mntRef|length %}<div>mnt-ref</div><div class="mono">{{ result.mntRef|join(', ') }}</div>{% endif %}
+
+          {% if result.descr and result.descr|length %}
+            {% for d in result.descr %}
+              <div>descr</div><div class="mono">{{ d }}</div>
+            {% endfor %}
+          {% endif %}
+
+          {% if result.geofeed %}<div>Geofeed</div><div class="mono"><a href="{{ result.geofeed }}" target="_blank" rel="noopener">{{ result.geofeed }}</a></div>{% endif %}
+
+          {% if result.creationDate %}<div>Created</div><div class="mono">{{ result.creationDate }}</div>{% endif %}
+          {% if result.updatedDate %}<div>Last-Modified</div><div class="mono">{{ result.updatedDate }}</div>{% endif %}
+
           {% if result.abuseContact.email %}<div>Abuse Email</div><div class="mono"><a href="mailto:{{ result.abuseContact.email }}">{{ result.abuseContact.email }}</a></div>{% endif %}
           {% if result.abuseContact.phone %}<div>Abuse Phone</div><div class="mono">{{ result.abuseContact.phone }}</div>{% endif %}
         </div>
+
         <div class="section">
           <details>
             <summary>Pokaż surowe RDAP (JSON)</summary>
