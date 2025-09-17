@@ -1,5 +1,5 @@
 import os, re
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -22,6 +22,22 @@ def _vcard(entity, field):
         for item in entity["vcardArray"][1]:
             if item[0] == field:
                 return item[3]
+    except Exception:
+        pass
+    return ""
+
+def _vcard_addr_str(entity) -> str:
+    """
+    Zwraca sformatowany adres z vCard 'adr' jako pojedynczy string:
+    'street, ext, locality, region, code, country' (bez pustych elementów).
+    """
+    try:
+        for item in entity["vcardArray"][1]:
+            if item[0] == "adr":
+                adr = item[3] or []
+                po, ext, street, locality, region, code, country = (adr + [None]*7)[:7]
+                parts = [p for p in [street, ext, locality, region, code, country] if p]
+                return ", ".join(parts)
     except Exception:
         pass
     return ""
@@ -141,7 +157,6 @@ def _collect_status_list(data: dict) -> List[str]:
 def _remarks_as_lines(data: dict) -> List[str]:
     lines: List[str] = []
     for r in (data.get("remarks") or []):
-        # remarks.description jest listą stringów
         for d in (r.get("description") or []):
             if isinstance(d, str):
                 for ln in d.splitlines():
@@ -151,7 +166,6 @@ def _remarks_as_lines(data: dict) -> List[str]:
     return lines
 
 def _extract_mnt_fields_from_remarks(data: dict) -> Dict[str, List[str]]:
-    # Szukamy w remarks linii w stylu: "mnt-by: something", "mnt-lower: x", itp.
     wanted = ["mnt-by", "mnt-lower", "mnt-routes", "mnt-domains", "mnt-ref"]
     acc: Dict[str, List[str]] = {k: [] for k in wanted}
     for ln in _remarks_as_lines(data):
@@ -170,14 +184,13 @@ def _extract_descr_and_geofeed(data: dict):
     for ln in _remarks_as_lines(data):
         if re.match(r'(?i)^geofeed\s*:\s*(\S+)$', ln):
             geofeed_url = re.sub(r'(?i)^geofeed\s*:\s*', '', ln).strip()
-        # RPSL 'descr:' linie
         if re.match(r'(?i)^descr\s*:\s*(.+)$', ln):
             descr_list.append(re.sub(r'(?i)^descr\s*:\s*', '', ln).strip())
     # 2) links rel=geofeed
     for link in (data.get("links") or []):
         if link.get("rel") == "geofeed" and isinstance(link.get("href"), str):
             geofeed_url = link["href"]
-    # 3) fallback: remarks.title == "description"
+    # 3) fallback: remarks.title == description
     if not descr_list:
         for r in (data.get("remarks") or []):
             if (r.get("title") or "").lower() in ("description", "descr"):
@@ -185,31 +198,47 @@ def _extract_descr_and_geofeed(data: dict):
                     if d: descr_list.append(d.strip())
     return descr_list, geofeed_url
 
-def _first_handle_with_role(entities, role_name: str) -> str:
-    for e in (entities or []):
-        if role_name in _roles(e):
-            h = e.get("handle")
-            if h: return h
-    return ""
-
-def _org_info_from_entities(entities):
+def _org_info_from_entities(entities) -> Tuple[str, str, str]:
+    """
+    Zwraca (org_name, org_handle, org_address).
+    org_address pobieramy z pierwszego entity, które ma vCard adr;
+    preferujemy entity powiązane z organizacją (np. handle 'ORG-...').
+    """
     org_name = ""
     org_handle = ""
+    org_address = ""
+
+    # najpierw zbierz kandydatów
     for e in (entities or []):
         r = _roles(e)
         h = e.get("handle") or ""
-        # Szukaj czegoś w stylu ORG-XXX-YYYY
-        if (("registrant" in r) or ("administrative" in r) or ("technical" in r) or ("abuse" in r)) and (h.startswith("ORG-") or "-RIPE" in h):
-            org_handle = org_handle or h
         fn = _vcard(e, "fn")
         if fn and not org_name:
             org_name = fn
-    return org_name, org_handle
+        # preferowane ORG/… albo ...-RIPE jako org handle
+        if (h.startswith("ORG-") or "-RIPE" in h) and not org_handle:
+            org_handle = h
+
+    # spróbuj znaleźć adres w entity org-handle
+    if org_handle:
+        for e in (entities or []):
+            if e.get("handle") == org_handle:
+                org_address = _vcard_addr_str(e)
+                if org_address:
+                    break
+
+    # jeśli nie udało się, weź pierwszy z adresem
+    if not org_address:
+        for e in (entities or []):
+            org_address = _vcard_addr_str(e)
+            if org_address:
+                break
+
+    return org_name, org_handle, org_address
 
 def _ip_version(data: dict) -> str:
     v = data.get("ipVersion", "")
     if v: return v
-    # fallback heurystyczny
     sa = data.get("startAddress", "")
     if ":" in sa: return "v6"
     return "v4" if sa else ""
@@ -229,7 +258,7 @@ def _parse_ip(data: dict) -> dict:
     if sa and ea: ip_range = f"{sa} - {ea}"
 
     entities = data.get("entities") or []
-    org_name, org_handle = _org_info_from_entities(entities)
+    org_name, org_handle, org_addr = _org_info_from_entities(entities)
 
     abuse_email = ""; abuse_tel = ""
     for e in entities:
@@ -238,10 +267,17 @@ def _parse_ip(data: dict) -> dict:
             abuse_email = _vcard(e, "email") or abuse_email
             abuse_tel   = _vcard(e, "tel") or abuse_tel
 
-    # Kontakty: admin-c / tech-c / abuse-c (handlery)
-    admin_c = _first_handle_with_role(entities, "administrative")
-    tech_c  = _first_handle_with_role(entities, "technical")
-    abuse_c = _first_handle_with_role(entities, "abuse")
+    # handlery ról
+    def _first_handle_with_role(role_name: str) -> str:
+        for e in (entities or []):
+            if role_name in _roles(e):
+                h = e.get("handle")
+                if h: return h
+        return ""
+
+    admin_c = _first_handle_with_role("administrative")
+    tech_c  = _first_handle_with_role("technical")
+    abuse_c = _first_handle_with_role("abuse")
 
     # mnt-* z remarks
     mnt = _extract_mnt_fields_from_remarks(data)
@@ -249,7 +285,7 @@ def _parse_ip(data: dict) -> dict:
     # descr i geofeed
     descr_list, geofeed_url = _extract_descr_and_geofeed(data)
 
-    # status (lista), typ, nazwa
+    # status (lista)
     statuses = _collect_status_list(data)
 
     return {
@@ -265,9 +301,10 @@ def _parse_ip(data: dict) -> dict:
         "name": data.get("name", ""),
         "type": data.get("type", ""),
         "country": data.get("country", ""),
-        "status": statuses,  # <-- nowość
+        "status": statuses,
         "org": org_name,
         "orgHandle": org_handle,
+        "orgAddress": org_addr,  # <-- NOWE: sformatowany adres z vCard adr
         "adminC": admin_c,
         "techC": tech_c,
         "abuseC": abuse_c,
@@ -282,7 +319,7 @@ def _parse_ip(data: dict) -> dict:
         "updatedDate": _event(data, "last changed"),
         "creationDate": _event(data, "registration"),
         "events": data.get("events") or [],
-        "entities": entities,  # przekażemy dalej (do ewentualnego rozwoju w templacie)
+        "entities": entities,
         "links": data.get("links") or [],
         "remarks": data.get("remarks") or [],
     }
@@ -336,7 +373,7 @@ async def home(request: Request, q: Optional[str] = None):
     if q:
         try:
             rdap_raw = await _fetch_rdap(q.strip())  # pełna odpowiedź RDAP (RAW)
-            result = _normalize(rdap_raw)            # Twoja normalizacja do estetycznego widoku
+            result = _normalize(rdap_raw)            # normalizacja do widoku
         except HTTPException as e:
             error = f"Błąd: {e.detail}"
         except Exception:
