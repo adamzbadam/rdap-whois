@@ -1,14 +1,35 @@
-import os, re
+import os, re, unicodedata
 from typing import Optional, List, Dict, Tuple
 from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 import httpx
+import idna  # pip install idna
 
 app = FastAPI(title="RDAP WHOIS")
 templates = Jinja2Templates(directory="templates")
 
-RDAP_HEADERS = {"Accept": "application/rdap+json, application/json"}
+USER_AGENT = "rdap-whois/1.0 (+https://github.com/adamzbadam/rdap-whois)"
+
+# Domyślne nagłówki — proste i „bezpieczne” dla większości serwerów RDAP
+BASE_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "application/rdap+json",
+}
+
+DOT_VARIANTS = {
+    "\uFF0E": ".",  # fullwidth full stop
+    "\u3002": ".",  # ideographic full stop
+    "\uFF61": ".",  # halfwidth ideographic full stop
+}
+
+def _normalize_domain(raw: str) -> str:
+    s = unicodedata.normalize("NFC", raw.strip())
+    s = "".join(DOT_VARIANTS.get(ch, ch) for ch in s)
+    s = s.replace("\u200B", "").replace("\u200C", "").replace("\u200D", "")
+    s = s.lower()
+    labels = [idna.encode(lbl, uts46=True).decode("ascii") for lbl in s.split(".") if lbl]
+    return ".".join(labels)
 
 def _roles(entity):
     r = entity.get("roles")
@@ -27,10 +48,6 @@ def _vcard(entity, field):
     return ""
 
 def _vcard_addr_parts(entity) -> Tuple[str, str, str, str, str, str]:
-    """
-    Zwraca (street, ext, city, region, postal, country_name) z vCard 'adr'.
-    Jeśli brak 'adr' – zwraca puste stringi.
-    """
     try:
         for item in entity["vcardArray"][1]:
             if item[0] == "adr":
@@ -42,9 +59,6 @@ def _vcard_addr_parts(entity) -> Tuple[str, str, str, str, str, str]:
     return ("", "", "", "", "", "")
 
 def _vcard_addr_cc(entity) -> str:
-    """
-    Zwraca country code z parametrów 'adr' (np. {'cc': 'PL'}) jeżeli jest.
-    """
     try:
         for item in entity["vcardArray"][1]:
             if item[0] == "adr":
@@ -63,29 +77,158 @@ def _detect_kind(q: str) -> str:
         return "ip"
     return "domain"
 
+def _extract_rdap_error(json_obj: Dict) -> str:
+    title = json_obj.get("title")
+    desc = None
+    if isinstance(json_obj.get("description"), list) and json_obj["description"]:
+        desc = json_obj["description"][0]
+    if isinstance(json_obj.get("notices"), list):
+        for n in json_obj["notices"]:
+            ds = n.get("description") or []
+            for d in ds:
+                if isinstance(d, str) and d.strip():
+                    desc = desc or d.strip()
+                    break
+    parts = [p for p in [title, desc] if p]
+    return " — ".join(parts) if parts else "RDAP: obiekt nie znaleziony"
+
+async def _http_get(client: httpx.AsyncClient, url: str, headers: Dict[str, str]) -> httpx.Response:
+    return await client.get(url, headers=headers)
+
 async def _fetch_rdap(q: str) -> dict:
-    kind = _detect_kind(q)
-    urls = []
+    """
+    RDAP dla domeny/IP/AS:
+    1) rdap.org (bootstrap) – follow_redirects=True
+    2) jeśli 400 Bad Request → retry: (a) bez `Accept`, (b) dla .br również bezpośrednio u registro.br
+    3) dla domen – fallback do Identity Digital, gdy primary ≠ 404
+    4) 404 z RDAP JSON → zwracamy czytelny 404
+    """
+    raw_q = q.strip()
+    kind = _detect_kind(raw_q)
+    q_norm = _normalize_domain(raw_q) if kind == "domain" else raw_q
+
     if kind == "ip":
-        urls = [f"https://rdap.org/ip/{q}"]
+        primary = f"https://rdap.org/ip/{q_norm}"
+        fallbacks: List[str] = []
+        compat: List[Tuple[str, Dict[str,str]]] = []
     elif kind == "autnum":
-        num = re.sub(r'(?i)^AS', '', q)
-        urls = [f"https://rdap.org/autnum/{num}"]
+        num = re.sub(r'(?i)^AS', '', q_norm)
+        primary = f"https://rdap.org/autnum/{num}"
+        fallbacks = []
+        compat = []
     else:
-        urls = [
-            f"https://rdap.org/domain/{q}",
-            f"https://rdap.identitydigital.services/rdap/domain/{q}",
-        ]
+        primary = f"https://rdap.org/domain/{q_norm}"
+        fallbacks = [f"https://rdap.identitydigital.services/rdap/domain/{q_norm}"]
+        compat = []
+        # specjalny „direct” do registro.br dla .br (gdyby bootstrap zwrócił 400)
+        if q_norm.endswith(".br"):
+            compat.append((f"https://rdap.registro.br/domain/{q_norm}", BASE_HEADERS))
+
+    last_error: Optional[Tuple[int, str]] = None
 
     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-        for url in urls:
-            try:
-                r = await client.get(url, headers=RDAP_HEADERS)
-                if r.status_code < 400:
+        # 1) primary (z domyślnymi nagłówkami)
+        try:
+            r = await _http_get(client, primary, BASE_HEADERS)
+        except httpx.HTTPError as e:
+            last_error = (502, f"Błąd sieci: {e!s}")
+        else:
+            if r.status_code < 400:
+                try:
                     return r.json()
-            except Exception:
+                except ValueError:
+                    raise HTTPException(status_code=502, detail="Błędny JSON z serwera RDAP")
+            if r.status_code == 404:
+                try:
+                    data = r.json()
+                    msg = _extract_rdap_error(data)
+                except ValueError:
+                    msg = "RDAP: obiekt nie znaleziony"
+                raise HTTPException(status_code=404, detail=msg)
+            # 400 → podejście kompatybilnościowe
+            if r.status_code == 400:
+                # 2a) retry bez Accept
+                try:
+                    r2 = await _http_get(client, primary, {"User-Agent": USER_AGENT})
+                    if r2.status_code < 400:
+                        return r2.json()
+                    if r2.status_code == 404:
+                        try:
+                            data = r2.json()
+                            msg = _extract_rdap_error(data)
+                        except ValueError:
+                            msg = "RDAP: obiekt nie znaleziony"
+                        raise HTTPException(status_code=404, detail=msg)
+                    # zapisz błąd
+                    try:
+                        data = r2.json()
+                        last_error = (r2.status_code, _extract_rdap_error(data))
+                    except ValueError:
+                        last_error = (r2.status_code, f"RDAP HTTP {r2.status_code}")
+                except httpx.HTTPError:
+                    pass
+
+                # 2b) jeśli .br – spróbuj bezpośrednio u registro.br
+                for url, hdrs in compat:
+                    try:
+                        r3 = await _http_get(client, url, hdrs)
+                    except httpx.HTTPError:
+                        continue
+                    if r3.status_code < 400:
+                        return r3.json()
+                    if r3.status_code == 404:
+                        try:
+                            data = r3.json()
+                            msg = _extract_rdap_error(data)
+                        except ValueError:
+                            msg = "RDAP: obiekt nie znaleziony"
+                        raise HTTPException(status_code=404, detail=msg)
+                    try:
+                        data = r3.json()
+                        last_error = (r3.status_code, _extract_rdap_error(data))
+                    except ValueError:
+                        last_error = (r3.status_code, f"RDAP HTTP {r3.status_code}")
+            else:
+                # inne 4xx/5xx — zapamiętaj treść
+                try:
+                    data = r.json()
+                    last_error = (r.status_code, _extract_rdap_error(data))
+                except ValueError:
+                    last_error = (r.status_code, f"RDAP HTTP {r.status_code}")
+
+        # 3) fallbacks (tylko domeny)
+        for url in fallbacks:
+            try:
+                r2 = await _http_get(client, url, BASE_HEADERS)
+            except httpx.HTTPError:
                 continue
+            if r2.status_code < 400:
+                try:
+                    return r2.json()
+                except ValueError:
+                    raise HTTPException(status_code=502, detail="Błędny JSON z serwera RDAP (fallback)")
+            if r2.status_code == 404:
+                try:
+                    data = r2.json()
+                    msg = _extract_rdap_error(data)
+                except ValueError:
+                    msg = "RDAP: obiekt nie znaleziony"
+                raise HTTPException(status_code=404, detail=msg)
+            try:
+                data = r2.json()
+                last_error = (r2.status_code, _extract_rdap_error(data))
+            except ValueError:
+                last_error = (r2.status_code, f"RDAP HTTP {r2.status_code}")
+
+    if last_error:
+        code, msg = last_error
+        # heurystyka: 400/422 z komunikatem „not found” -> mapuj na 404
+        if any(k in (msg or "").lower() for k in ["not found", "não encontrado", "does not exist", "unassigned", "no match"]):
+            raise HTTPException(status_code=404, detail=msg or "RDAP: obiekt nie znaleziony")
+        raise HTTPException(status_code=code if 400 <= code < 600 else 502, detail=msg or "Błąd RDAP")
     raise HTTPException(status_code=502, detail="Nie udało się pobrać danych RDAP")
+
+# ---------------- parsowanie/normalizacja odpowiedzi ---------------------------
 
 def _event(data: dict, action: str) -> str:
     for ev in (data.get("events") or []):
@@ -117,25 +260,12 @@ def _find_registrant_entity(entities):
     return None
 
 def _registrant_info_for_pl(entities) -> Dict[str, str]:
-    """
-    Zwraca słownik z informacjami o rejestrancie dla .PL:
-    {
-      'name': 'Interia.pl sp. z o.o.',
-      'street': 'Ul. Kotlarska 11',
-      'city': 'Kraków',
-      'postal': '31-539',
-      'countryCode': 'PL',
-      'formatted': 'Interia.pl sp. z o.o.\nUl. Kotlarska 11\nKraków\n31-539\nPL'
-    }
-    Jeśli nie znajdzie – zwraca {}.
-    """
     ent = _find_registrant_entity(entities or [])
     if not ent:
         return {}
     name = _vcard(ent, "fn") or ""
     street, ext, city, region, postal, country_name = _vcard_addr_parts(ent)
     cc = _vcard_addr_cc(ent) or ""
-    # Budujemy linie wg wzoru użytkownika
     lines = []
     if name: lines.append(name)
     if street: lines.append(street)
@@ -156,7 +286,6 @@ def _registrant_info_for_pl(entities) -> Dict[str, str]:
 def _parse_domain(data: dict) -> dict:
     reg = _registrar_entity(data.get("entities") or [])
     reg_name = _vcard(reg, "fn") if reg else ""
-    # IANA Registrar ID
     reg_iana = ""
     if reg:
         for pid in (reg.get("publicIds") or []):
@@ -168,13 +297,11 @@ def _parse_domain(data: dict) -> dict:
             if pid.get("type") == "IANA Registrar ID":
                 reg_iana = pid.get("identifier", "")
                 break
-    # Registrar URL (rel=about)
     reg_url = ""
     if reg:
         for link in (reg.get("links") or []):
             if link.get("rel") == "about" and isinstance(link.get("href"), str):
                 reg_url = link["href"]; break
-    # Abuse contact
     abuse = _abuse_entity(reg) if reg else None
     abuse_email = _vcard(abuse, "email") if abuse else ""
     abuse_tel   = _vcard(abuse, "tel") if abuse else ""
@@ -190,11 +317,8 @@ def _parse_domain(data: dict) -> dict:
 
     dnssec = "signed" if data.get("secureDNS", {}).get("delegationSigned") else "unsigned"
 
-    # Czy to .PL?
     dom = (data.get("ldhName") or data.get("unicodeName") or "")
     is_pl = dom.lower().endswith(".pl")
-
-    # Registrant dla .PL
     registrant = _registrant_info_for_pl(data.get("entities") or []) if is_pl else {}
 
     return {
@@ -211,7 +335,7 @@ def _parse_domain(data: dict) -> dict:
         "nameServers": nameservers,
         "dnssec": dnssec,
         "abuseContact": {"email": abuse_email, "phone": abuse_tel},
-        "registrant": registrant,  # <-- NOWE
+        "registrant": registrant,
     }
 
 def _collect_status_list(data: dict) -> List[str]:
@@ -343,9 +467,9 @@ def _parse_ip(data: dict) -> dict:
         "org": org_name,
         "orgHandle": org_handle,
         "orgAddress": org_addr,
-        "adminC": admin_c,
-        "techC": tech_c,
-        "abuseC": abuse_c,
+        "adminC": _first_handle_with_role("administrative"),
+        "techC": _first_handle_with_role("technical"),
+        "abuseC": _first_handle_with_role("abuse"),
         "abuseContact": {"email": abuse_email, "phone": abuse_tel},
         "mntBy": mnt.get("mnt-by") or [],
         "mntLower": mnt.get("mnt-lower") or [],
@@ -412,8 +536,8 @@ async def home(request: Request, q: Optional[str] = None):
             result = _normalize(rdap_raw)
         except HTTPException as e:
             error = f"Błąd: {e.detail}"
-        except Exception:
-            error = "Wystąpił nieoczekiwany błąd"
+        except Exception as e:
+            error = f"Wystąpił nieoczekiwany błąd: {e!s}"
 
     return templates.TemplateResponse(
         "index.html",
