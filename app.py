@@ -1,4 +1,4 @@
-import os, re
+import os, re, time
 import socket
 import ipaddress
 from typing import Optional, List, Dict, Tuple
@@ -19,6 +19,11 @@ app = FastAPI(title="RDAP WHOIS")
 templates = Jinja2Templates(directory="templates")
 
 RDAP_HEADERS = {"Accept": "application/rdap+json, application/json"}
+
+# Cache na bootstrap IANA
+_BOOTSTRAP_DNS: Optional[dict] = None
+_BOOTSTRAP_FETCHED_AT: float = 0.0
+_BOOTSTRAP_TTL: float = 24 * 3600  # 24h
 
 
 # ---------------------------
@@ -103,26 +108,41 @@ def _base_domain(host: str) -> str:
     Preferuje tldextract (Public Suffix List). Fallback: ostatnie 2-3 etykiety.
     """
     h = (host or "").strip().lower().rstrip(".")
-    # jeśli wygląda na IP – nie ruszaj
     if _is_ip(h):
         return h
-    # tldextract – najlepsza dokładność
     if _HAS_TLDEXTRACT:
         ext = tldextract.extract(h)  # type: ignore
         if ext.domain and ext.suffix:
             return f"{ext.domain}.{ext.suffix}"
         return h
-    # fallback: prosta heurystyka
     parts = h.split(".")
     if len(parts) <= 2:
         return h
-    # prosty wyjątek dla popularnych dwuczłonowych sufiksów
     two_label_tlds = {"co.uk", "com.au", "co.jp", "com.br", "co.nz", "org.uk", "gov.uk"}
     last2 = ".".join(parts[-2:])
     last3 = ".".join(parts[-3:])
     if last2 in two_label_tlds and len(parts) >= 3:
         return ".".join(parts[-3:])
     return last2
+
+
+def _public_suffix(host: str) -> str:
+    """
+    Zwraca PSL-suffix (np. 'com', 'br', 'com.br' jeśli PSL tak definiuje).
+    """
+    h = (host or "").strip().lower().rstrip(".")
+    if _HAS_TLDEXTRACT:
+        ext = tldextract.extract(h)  # type: ignore
+        return ext.suffix or ""
+    # fallback heurystyczny – zachowaj zgodność z _base_domain()
+    parts = h.split(".")
+    if len(parts) <= 1:
+        return ""
+    two_label_tlds = {"co.uk", "com.au", "co.jp", "com.br", "co.nz", "org.uk", "gov.uk"}
+    last2 = ".".join(parts[-2:])
+    if last2 in two_label_tlds:
+        return last2
+    return parts[-1]
 
 
 # ---------------------------
@@ -135,7 +155,6 @@ def _resolve_ips(hostname: str) -> List[str]:
     """
     hostname = (hostname or "").strip().rstrip(".")
     if not hostname or _is_ip(hostname):
-        # jeżeli ktoś podał IP – nie zwracamy nic (logika projektu)
         return []
     ips = set()
     try:
@@ -155,7 +174,89 @@ def _resolve_ips(hostname: str) -> List[str]:
 
 
 # ---------------------------
-# Pobieranie RDAP
+# IANA RDAP bootstrap (DNS)
+# ---------------------------
+async def _get_bootstrap_dns(client: httpx.AsyncClient) -> Optional[dict]:
+    global _BOOTSTRAP_DNS, _BOOTSTRAP_FETCHED_AT
+    now = time.time()
+    if _BOOTSTRAP_DNS and (now - _BOOTSTRAP_FETCHED_AT) < _BOOTSTRAP_TTL:
+        return _BOOTSTRAP_DNS
+    try:
+        r = await client.get("https://data.iana.org/rdap/dns.json", timeout=15)
+        if r.status_code == 200 and "json" in (r.headers.get("content-type") or ""):
+            _BOOTSTRAP_DNS = r.json()
+            _BOOTSTRAP_FETCHED_AT = now
+            return _BOOTSTRAP_DNS
+    except Exception:
+        pass
+    return _BOOTSTRAP_DNS  # może być None, jeśli pierwsze pobranie nie wyszło
+
+
+def _rdap_bases_for_suffix(bootstrap: dict, suffix: str) -> List[str]:
+    """
+    Zwraca listę bazowych URL-i RDAP dla danego suffixu na podstawie bootstrapu IANA.
+    """
+    if not bootstrap or not suffix:
+        return []
+    services = bootstrap.get("services") or []
+    # najpierw próbuj idealnego dopasowania (np. 'com.br'), potem krótszych (np. 'br')
+    candidates = [suffix]
+    if "." in suffix:
+        candidates.append(suffix.split(".")[-1])
+
+    bases: List[str] = []
+    for cand in candidates:
+        for item in services:
+            tlds = item[0] if len(item) > 0 else []
+            urls = item[1] if len(item) > 1 else []
+            if any(cand == t.lower() for t in tlds):
+                for u in urls:
+                    if isinstance(u, str) and u.startswith("http"):
+                        bases.append(u)
+        if bases:
+            break
+    # deduplikacja i porządek
+    seen = set()
+    ordered = []
+    for b in bases:
+        b = b.strip()
+        if not b.endswith("/"):
+            b += "/"
+        if b not in seen:
+            seen.add(b)
+            ordered.append(b)
+    return ordered
+
+
+def _extract_alt_rdap_urls(err_json: dict) -> List[str]:
+    """
+    Wyciąga potencjalne alternatywne linki RDAP z pól 'links' i 'notices[].links'.
+    """
+    links: List[str] = []
+    for lk in (err_json.get("links") or []):
+        href = lk.get("href")
+        if isinstance(href, str) and href.startswith("http"):
+            links.append(href)
+    for n in (err_json.get("notices") or []):
+        for lk in (n.get("links") or []):
+            href = lk.get("href")
+            if isinstance(href, str) and href.startswith("http"):
+                links.append(href)
+    # Filtruj tylko te, które wyglądają jak endpoint RDAP dla domen
+    cleaned = []
+    for u in links:
+        if "/domain/" in u:
+            cleaned.append(u)
+    # deduplikacja
+    seen = set(); uniq = []
+    for u in cleaned:
+        if u not in seen:
+            seen.add(u); uniq.append(u)
+    return uniq
+
+
+# ---------------------------
+# Pobieranie RDAP (z fallbackami)
 # ---------------------------
 async def _fetch_rdap(q: str) -> dict:
     kind = _detect_kind(q)
@@ -172,13 +273,43 @@ async def _fetch_rdap(q: str) -> dict:
         ]
 
     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        # 1) spróbuj bezpośrednio z listy URL-i
         for url in urls:
             try:
                 r = await client.get(url, headers=RDAP_HEADERS)
                 if r.status_code < 400:
                     return r.json()
+                # 1a) jeśli błąd, spróbuj wyłuskać alternatywne linki z payloadu
+                alt_urls = []
+                try:
+                    data_err = r.json()
+                    alt_urls = _extract_alt_rdap_urls(data_err)
+                except Exception:
+                    pass
+                for au in alt_urls:
+                    try:
+                        rr = await client.get(au, headers=RDAP_HEADERS)
+                        if rr.status_code < 400:
+                            return rr.json()
+                    except Exception:
+                        continue
             except Exception:
                 continue
+
+        # 2) fallback via IANA bootstrap (tylko dla domen)
+        if kind == "domain":
+            suffix = _public_suffix(q)
+            bootstrap = await _get_bootstrap_dns(client)
+            bases = _rdap_bases_for_suffix(bootstrap or {}, suffix)
+            for base in bases:
+                url = f"{base}domain/{q}"
+                try:
+                    r = await client.get(url, headers=RDAP_HEADERS)
+                    if r.status_code < 400:
+                        return r.json()
+                except Exception:
+                    continue
+
     raise HTTPException(status_code=502, detail="Nie udało się pobrać danych RDAP")
 
 
@@ -220,9 +351,6 @@ def _find_registrant_entity(entities):
 
 
 def _registrant_info_for_pl(entities) -> Dict[str, str]:
-    """
-    Zwraca słownik z informacjami o rejestrancie dla .PL.
-    """
     ent = _find_registrant_entity(entities or [])
     if not ent:
         return {}
@@ -303,7 +431,7 @@ def _parse_domain(data: dict) -> dict:
         "dnssec": dnssec,
         "abuseContact": {"email": abuse_email, "phone": abuse_tel},
         "registrant": registrant,
-        # Pola 'ips' / 'subdomainIps' dokładamy w routingu
+        # 'ips' / 'subdomainIps' dokładamy w routingu
     }
 
 
@@ -508,24 +636,18 @@ async def api_rdap(q: str = Query(..., description="domena / subdomena / IP / AS
     q = q.strip().rstrip(".")
     kind = _detect_kind(q)
 
-    # Domény i subdomeny
     if kind == "domain" and not _is_ip(q):
         base = _base_domain(q)
-        # RDAP wykonujemy zawsze dla domeny rejestrowalnej
         data = await _fetch_rdap(base)
         result = _normalize(data)
-        # Meta o hostach
         result["baseDomain"] = base
         result["queriedHost"] = q
-        # IP dla domeny
-        ips_domain = _resolve_ips(base)
-        result["ips"] = ips_domain  # może być []
-        # IP dla subdomeny, jeżeli różni się od domeny
+        result["ips"] = _resolve_ips(base)  # może być []
         if q != base:
             result["subdomainIps"] = _resolve_ips(q)  # może być []
         return JSONResponse(result)
 
-    # IP lub AS – dotychczasowa logika (bez bloków IP nad tabelką)
+    # IP lub AS
     data = await _fetch_rdap(q)
     result = _normalize(data)
     return JSONResponse(result)
@@ -546,9 +668,9 @@ async def home(request: Request, q: Optional[str] = None):
                 result = _normalize(rdap_raw)
                 result["baseDomain"] = base
                 result["queriedHost"] = q_clean
-                result["ips"] = _resolve_ips(base)  # może być []
+                result["ips"] = _resolve_ips(base)
                 if q_clean != base:
-                    result["subdomainIps"] = _resolve_ips(q_clean)  # może być []
+                    result["subdomainIps"] = _resolve_ips(q_clean)
             else:
                 rdap_raw = await _fetch_rdap(q_clean)
                 result = _normalize(rdap_raw)
