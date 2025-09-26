@@ -96,6 +96,21 @@
         <pre id="copy-summary-domain" style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden;">{{ L|join("\n") }}</pre>
         {# ===== /Podsumowanie (DOMAIN) ===== #}
 
+        {# ======= NOWY BLOK: ADRESY IP (tylko dla domen, jeśli backend zwrócił 'ips') ======= #}
+        {% if result.ips and result.ips|length %}
+          <div class="section notice" style="border-radius:8px; padding:.6rem .8rem;">
+            <div class="stack">
+              <div><b>Adresy IP:</b></div>
+              {% for ip in result.ips %}
+                <code>{{ ip }}</code>
+              {% endfor %}
+              <button class="copy" data-copy="{{ result.ips|join(', ') }}" title="Kopiuj wszystkie IP">Kopiuj IP</button>
+            </div>
+            <div class="muted small" style="margin-top:.35rem;">Pobrane z DNS (rekordy A/AAAA) dla nazwy domeny.</div>
+          </div>
+        {% endif %}
+        {# ======= /NOWY BLOK ======= #}
+
         <div class="kv">
           <div>Domain Name</div>
           <div class="mono stack">
