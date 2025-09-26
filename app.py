@@ -281,7 +281,6 @@ async def _get_json_with_redirects(client: httpx.AsyncClient, url: str, attempts
                 except Exception as ex:
                     attempts.append({"url": current, "status": "EXC-follow", "error": str(ex)})
                     return None
-                # ostatecznie zwróć pusty obiekt, żeby nie uznać za porażkę transportową
                 return {}
 
         # 3xx -> ręcznie przeskocz po Location (absolutny/relatywny)
@@ -312,8 +311,8 @@ async def _get_json_with_redirects(client: httpx.AsyncClient, url: str, attempts
 async def _fetch_rdap(q: str, debug_attempts: Optional[List[dict]] = None) -> dict:
     kind = _detect_kind(q)
 
-    # http2=True pomaga czasem z Cloudflare/HTTP/2
-    async with httpx.AsyncClient(timeout=20, http2=True) as client:
+    # UWAGA: bez http2=True, żeby nie wymagać pakietu 'h2'
+    async with httpx.AsyncClient(timeout=20) as client:
         urls: List[str] = []
 
         if kind == "ip":
@@ -341,7 +340,7 @@ async def _fetch_rdap(q: str, debug_attempts: Optional[List[dict]] = None) -> di
             if data is not None:
                 return data
 
-            # last-chance: spróbuj to samo ale wprost z auto-follow (czasem wystarczy)
+            # last-chance: spróbuj to samo, ale z auto-follow (czasem wystarczy)
             try:
                 r = await client.get(u, headers=RDAP_HEADERS, follow_redirects=True)
                 if debug_attempts is not None:
