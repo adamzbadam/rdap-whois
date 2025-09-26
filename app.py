@@ -1,7 +1,7 @@
-import os, re, time
+import os, re, time, json
 import socket
 import ipaddress
-import json
+from urllib.parse import urljoin
 from typing import Optional, List, Dict, Tuple
 from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -248,83 +248,85 @@ def _extract_alt_rdap_urls(err_json: dict) -> List[str]:
 
 
 # ---------------------------
-# Pobieranie RDAP (obsługa 302 + bootstrap)
+# Pobieranie RDAP (manualne 302 + bootstrap)
 # ---------------------------
-async def _http_get_json(client: httpx.AsyncClient, url: str) -> Optional[dict]:
+async def _get_json_with_redirects(client: httpx.AsyncClient, url: str, max_hops: int = 6) -> Optional[dict]:
     """
-    Robi GET z follow_redirects, obsługuje jawny 3xx+Location i próbuje zparsować JSON.
-    Zwraca słownik JSON lub None.
+    GET bez automatycznych redirectów. Jeśli dostaniemy 3xx i Location, przechodzimy ręcznie.
+    Gdy serwer zwróci JSON z alternatywnymi linkami RDAP, próbujemy również tam.
     """
-    try:
-        r = await client.get(url, headers=RDAP_HEADERS, follow_redirects=True)
-    except Exception:
-        return None
+    current = url
+    for _ in range(max_hops):
+        try:
+            r = await client.get(current, headers=RDAP_HEADERS, follow_redirects=False)
+        except Exception:
+            return None
 
-    # Jawna obsługa 3xx jeśli follow_redirects nie zadziałało (np. niestandardowe headery/redirecty)
-    if 300 <= r.status_code < 400:
-        loc = r.headers.get("location") or r.headers.get("Location")
-        if isinstance(loc, str) and loc.startswith("http"):
+        # 2xx -> spróbuj JSON
+        if 200 <= r.status_code < 300:
             try:
-                rr = await client.get(loc, headers=RDAP_HEADERS, follow_redirects=True)
-                if rr.status_code < 400:
-                    try:
-                        return rr.json()
-                    except Exception:
-                        try:
-                            return json.loads(rr.text)
-                        except Exception:
-                            return None
+                return r.json()
             except Exception:
-                return None
-        return None
+                try:
+                    return json.loads(r.text or "null")
+                except Exception:
+                    return {}
 
-    if r.status_code >= 400:
-        # Spróbuj wyciągnąć alternatywne linki z payloadu błędu
+        # 3xx -> ręcznie przeskocz po Location (może być link absolutny albo względny)
+        if 300 <= r.status_code < 400:
+            loc = r.headers.get("location") or r.headers.get("Location")
+            if not loc:
+                return None
+            if not loc.lower().startswith("http"):
+                loc = urljoin(current, loc)  # relatywny Location
+            current = loc
+            continue  # kolejny hop
+
+        # 4xx/5xx: spróbuj wyciągnąć alternatywne linki RDAP z payloadu
         try:
             data_err = r.json()
             for au in _extract_alt_rdap_urls(data_err):
-                data = await _http_get_json(client, au)
+                data = await _get_json_with_redirects(client, au, max_hops=max_hops-1)
                 if data is not None:
                     return data
         except Exception:
             pass
+
+        # nic nie wyszło
         return None
 
-    # 2xx – spróbuj parsować JSON
-    try:
-        return r.json()
-    except Exception:
-        try:
-            return json.loads(r.text)
-        except Exception:
-            return None
+    # za dużo hopów
+    return None
 
 
 async def _fetch_rdap(q: str) -> dict:
     kind = _detect_kind(q)
 
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=15) as client:
         urls: List[str] = []
 
         if kind == "ip":
             urls = [f"https://rdap.org/ip/{q}"]
+
         elif kind == "autnum":
             num = re.sub(r'(?i)^AS', '', q)
             urls = [f"https://rdap.org/autnum/{num}"]
+
         else:
-            # DOMENA: najpierw serwery z IANA bootstrap (precyzyjne dla sufiksów typu com.br),
-            # potem rdap.org i zapasowy identitydigital
+            # DOMENA: 1) bootstrap IANA (precyzyjny dla suffixów typu com.br)
             suffix = _public_suffix(q)
             bootstrap = await _get_bootstrap_dns(client)
             bases = _rdap_bases_for_suffix(bootstrap or {}, suffix)
+
+            # 2) rdap.org i zapasowy identitydigital
             urls = [f"{b}domain/{q}" for b in bases] + [
                 f"https://rdap.org/domain/{q}",
                 f"https://rdap.identitydigital.services/rdap/domain/{q}",
             ]
 
-        # próbuj po kolei, z pełną obsługą 3xx i alternatywnych linków
-        for url in urls:
-            data = await _http_get_json(client, url)
+        # próbuj po kolei, z manualnym śledzeniem 302 i alternatywnych linków
+        for u in urls:
+            data = await _get_json_with_redirects(client, u)
             if data is not None:
                 return data
 
@@ -369,6 +371,9 @@ def _find_registrant_entity(entities):
 
 
 def _registrant_info_for_pl(entities) -> Dict[str, str]:
+    """
+    Zwraca skrócone info rejestranta dla .PL (jeśli dostępne).
+    """
     ent = _find_registrant_entity(entities or [])
     if not ent:
         return {}
