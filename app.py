@@ -7,6 +7,14 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 import httpx
 
+# tldextract (opcjonalny – jeśli brak, użyjemy fallbacku)
+try:
+    import tldextract  # type: ignore
+    _HAS_TLDEXTRACT = True
+except Exception:
+    tldextract = None  # type: ignore
+    _HAS_TLDEXTRACT = False
+
 app = FastAPI(title="RDAP WHOIS")
 templates = Jinja2Templates(directory="templates")
 
@@ -87,13 +95,48 @@ def _is_ip(value: str) -> bool:
 
 
 # ---------------------------
-# Rozwiązywanie IP dla domen
+# Domeny / subdomeny
+# ---------------------------
+def _base_domain(host: str) -> str:
+    """
+    Zwraca domenę rejestrowalną (np. 'epaka.plus' dla 'pl.epaka.plus').
+    Preferuje tldextract (Public Suffix List). Fallback: ostatnie 2-3 etykiety.
+    """
+    h = (host or "").strip().lower().rstrip(".")
+    # jeśli wygląda na IP – nie ruszaj
+    if _is_ip(h):
+        return h
+    # tldextract – najlepsza dokładność
+    if _HAS_TLDEXTRACT:
+        ext = tldextract.extract(h)  # type: ignore
+        if ext.domain and ext.suffix:
+            return f"{ext.domain}.{ext.suffix}"
+        return h
+    # fallback: prosta heurystyka
+    parts = h.split(".")
+    if len(parts) <= 2:
+        return h
+    # prosty wyjątek dla popularnych dwuczłonowych sufiksów
+    two_label_tlds = {"co.uk", "com.au", "co.jp", "com.br", "co.nz", "org.uk", "gov.uk"}
+    last2 = ".".join(parts[-2:])
+    last3 = ".".join(parts[-3:])
+    if last2 in two_label_tlds and len(parts) >= 3:
+        return ".".join(parts[-3:])
+    return last2
+
+
+# ---------------------------
+# Rozwiązywanie IP dla hostów
 # ---------------------------
 def _resolve_ips(hostname: str) -> List[str]:
     """
     Zwraca unikalne adresy IP (A/AAAA) dla nazwy hosta.
     W przypadku błędu – pusta lista. IPv4 najpierw, potem IPv6.
     """
+    hostname = (hostname or "").strip().rstrip(".")
+    if not hostname or _is_ip(hostname):
+        # jeżeli ktoś podał IP – nie zwracamy nic (logika projektu)
+        return []
     ips = set()
     try:
         for res in socket.getaddrinfo(hostname, None):
@@ -178,16 +221,7 @@ def _find_registrant_entity(entities):
 
 def _registrant_info_for_pl(entities) -> Dict[str, str]:
     """
-    Zwraca słownik z informacjami o rejestrancie dla .PL:
-    {
-      'name': 'Interia.pl sp. z o.o.',
-      'street': 'Ul. Kotlarska 11',
-      'city': 'Kraków',
-      'postal': '31-539',
-      'countryCode': 'PL',
-      'formatted': 'Interia.pl sp. z o.o.\nUl. Kotlarska 11\nKraków\n31-539\nPL'
-    }
-    Jeśli nie znajdzie – zwraca {}.
+    Zwraca słownik z informacjami o rejestrancie dla .PL.
     """
     ent = _find_registrant_entity(entities or [])
     if not ent:
@@ -195,7 +229,6 @@ def _registrant_info_for_pl(entities) -> Dict[str, str]:
     name = _vcard(ent, "fn") or ""
     street, ext, city, region, postal, country_name = _vcard_addr_parts(ent)
     cc = _vcard_addr_cc(ent) or ""
-    # Budujemy linie wg wzoru użytkownika
     lines = []
     if name: lines.append(name)
     if street: lines.append(street)
@@ -251,11 +284,8 @@ def _parse_domain(data: dict) -> dict:
 
     dnssec = "signed" if data.get("secureDNS", {}).get("delegationSigned") else "unsigned"
 
-    # Czy to .PL?
     dom = (data.get("ldhName") or data.get("unicodeName") or "")
     is_pl = dom.lower().endswith(".pl")
-
-    # Registrant dla .PL
     registrant = _registrant_info_for_pl(data.get("entities") or []) if is_pl else {}
 
     return {
@@ -272,8 +302,8 @@ def _parse_domain(data: dict) -> dict:
         "nameServers": nameservers,
         "dnssec": dnssec,
         "abuseContact": {"email": abuse_email, "phone": abuse_tel},
-        "registrant": registrant,  # zachowujemy istniejące pole
-        # Uwaga: pole 'ips' dokładamy w warstwie routingu, gdzie mamy dostęp do oryginalnego q
+        "registrant": registrant,
+        # Pola 'ips' / 'subdomainIps' dokładamy w routingu
     }
 
 
@@ -474,15 +504,30 @@ def _normalize(data: dict) -> dict:
 # ROUTES
 # ---------------------------
 @app.get("/api/rdap")
-async def api_rdap(q: str = Query(..., description="domena / IP / AS12345")):
-    q = q.strip()
+async def api_rdap(q: str = Query(..., description="domena / subdomena / IP / AS12345")):
+    q = q.strip().rstrip(".")
+    kind = _detect_kind(q)
+
+    # Domény i subdomeny
+    if kind == "domain" and not _is_ip(q):
+        base = _base_domain(q)
+        # RDAP wykonujemy zawsze dla domeny rejestrowalnej
+        data = await _fetch_rdap(base)
+        result = _normalize(data)
+        # Meta o hostach
+        result["baseDomain"] = base
+        result["queriedHost"] = q
+        # IP dla domeny
+        ips_domain = _resolve_ips(base)
+        result["ips"] = ips_domain  # może być []
+        # IP dla subdomeny, jeżeli różni się od domeny
+        if q != base:
+            result["subdomainIps"] = _resolve_ips(q)  # może być []
+        return JSONResponse(result)
+
+    # IP lub AS – dotychczasowa logika (bez bloków IP nad tabelką)
     data = await _fetch_rdap(q)
     result = _normalize(data)
-
-    # DOŁĄCZ LISTĘ IP-ÓW TYLKO DLA ZAPYTAŃ O DOMENĘ
-    if _detect_kind(q) == "domain" and not _is_ip(q):
-        result["ips"] = _resolve_ips(q)
-
     return JSONResponse(result)
 
 
@@ -493,14 +538,20 @@ async def home(request: Request, q: Optional[str] = None):
     error = None
     if q:
         try:
-            q_clean = q.strip()
-            rdap_raw = await _fetch_rdap(q_clean)
-            result = _normalize(rdap_raw)
-
-            # DOŁĄCZ LISTĘ IP-ÓW TYLKO DLA ZAPYTAŃ O DOMENĘ
-            if _detect_kind(q_clean) == "domain" and not _is_ip(q_clean):
-                result["ips"] = _resolve_ips(q_clean)
-
+            q_clean = q.strip().rstrip(".")
+            kind = _detect_kind(q_clean)
+            if kind == "domain" and not _is_ip(q_clean):
+                base = _base_domain(q_clean)
+                rdap_raw = await _fetch_rdap(base)
+                result = _normalize(rdap_raw)
+                result["baseDomain"] = base
+                result["queriedHost"] = q_clean
+                result["ips"] = _resolve_ips(base)  # może być []
+                if q_clean != base:
+                    result["subdomainIps"] = _resolve_ips(q_clean)  # może być []
+            else:
+                rdap_raw = await _fetch_rdap(q_clean)
+                result = _normalize(rdap_raw)
         except HTTPException as e:
             error = f"Błąd: {e.detail}"
         except Exception:
