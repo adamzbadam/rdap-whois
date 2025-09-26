@@ -1,4 +1,6 @@
 import os, re
+import socket
+import ipaddress
 from typing import Optional, List, Dict, Tuple
 from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -10,12 +12,17 @@ templates = Jinja2Templates(directory="templates")
 
 RDAP_HEADERS = {"Accept": "application/rdap+json, application/json"}
 
+
+# ---------------------------
+# Pomocnicze: role / vCard
+# ---------------------------
 def _roles(entity):
     r = entity.get("roles")
     if r is None: return []
     if isinstance(r, list): return r
     if isinstance(r, str): return [r]
     return []
+
 
 def _vcard(entity, field):
     try:
@@ -25,6 +32,7 @@ def _vcard(entity, field):
     except Exception:
         pass
     return ""
+
 
 def _vcard_addr_parts(entity) -> Tuple[str, str, str, str, str, str]:
     """
@@ -41,6 +49,7 @@ def _vcard_addr_parts(entity) -> Tuple[str, str, str, str, str, str]:
         pass
     return ("", "", "", "", "", "")
 
+
 def _vcard_addr_cc(entity) -> str:
     """
     Zwraca country code z parametrów 'adr' (np. {'cc': 'PL'}) jeżeli jest.
@@ -56,6 +65,10 @@ def _vcard_addr_cc(entity) -> str:
         pass
     return ""
 
+
+# ---------------------------
+# Wykrywanie typu zapytania
+# ---------------------------
 def _detect_kind(q: str) -> str:
     if re.fullmatch(r'(?i)AS?\d+', q) or re.fullmatch(r'\d+', q):
         return "autnum"
@@ -63,6 +76,44 @@ def _detect_kind(q: str) -> str:
         return "ip"
     return "domain"
 
+
+def _is_ip(value: str) -> bool:
+    """Dokładna walidacja IP (IPv4/IPv6)."""
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+# ---------------------------
+# Rozwiązywanie IP dla domen
+# ---------------------------
+def _resolve_ips(hostname: str) -> List[str]:
+    """
+    Zwraca unikalne adresy IP (A/AAAA) dla nazwy hosta.
+    W przypadku błędu – pusta lista. IPv4 najpierw, potem IPv6.
+    """
+    ips = set()
+    try:
+        for res in socket.getaddrinfo(hostname, None):
+            addr = res[4][0]
+            try:
+                ipaddress.ip_address(addr)
+                ips.add(addr)
+            except ValueError:
+                continue
+    except socket.gaierror:
+        pass
+
+    def _key(ip: str):
+        return (0 if ":" not in ip else 1, ip)
+    return sorted(ips, key=_key)
+
+
+# ---------------------------
+# Pobieranie RDAP
+# ---------------------------
 async def _fetch_rdap(q: str) -> dict:
     kind = _detect_kind(q)
     urls = []
@@ -87,16 +138,22 @@ async def _fetch_rdap(q: str) -> dict:
                 continue
     raise HTTPException(status_code=502, detail="Nie udało się pobrać danych RDAP")
 
+
+# ---------------------------
+# Parsowanie / normalizacja
+# ---------------------------
 def _event(data: dict, action: str) -> str:
     for ev in (data.get("events") or []):
         if ev.get("eventAction") == action:
             return ev.get("eventDate", "")
     return ""
 
+
 def _camel_epp(s: str) -> str:
     parts = s.split()
     if not parts: return ""
     return parts[0] + "".join(p[:1].upper() + p[1:] for p in parts[1:])
+
 
 def _registrar_entity(entities):
     for e in (entities or []):
@@ -104,17 +161,20 @@ def _registrar_entity(entities):
             return e
     return None
 
+
 def _abuse_entity(entity):
     for e in (entity.get("entities") or []):
         if "abuse" in _roles(e):
             return e
     return None
 
+
 def _find_registrant_entity(entities):
     for e in (entities or []):
         if "registrant" in _roles(e):
             return e
     return None
+
 
 def _registrant_info_for_pl(entities) -> Dict[str, str]:
     """
@@ -152,6 +212,7 @@ def _registrant_info_for_pl(entities) -> Dict[str, str]:
         "countryCode": cc or "",
         "formatted": formatted
     }
+
 
 def _parse_domain(data: dict) -> dict:
     reg = _registrar_entity(data.get("entities") or [])
@@ -211,13 +272,16 @@ def _parse_domain(data: dict) -> dict:
         "nameServers": nameservers,
         "dnssec": dnssec,
         "abuseContact": {"email": abuse_email, "phone": abuse_tel},
-        "registrant": registrant,  # <-- NOWE
+        "registrant": registrant,  # zachowujemy istniejące pole
+        # Uwaga: pole 'ips' dokładamy w warstwie routingu, gdzie mamy dostęp do oryginalnego q
     }
+
 
 def _collect_status_list(data: dict) -> List[str]:
     st = data.get("status") or []
     if isinstance(st, str): st = [st]
     return st
+
 
 def _remarks_as_lines(data: dict) -> List[str]:
     lines: List[str] = []
@@ -230,6 +294,7 @@ def _remarks_as_lines(data: dict) -> List[str]:
                         lines.append(ln)
     return lines
 
+
 def _extract_mnt_fields_from_remarks(data: dict) -> Dict[str, List[str]]:
     wanted = ["mnt-by", "mnt-lower", "mnt-routes", "mnt-domains", "mnt-ref"]
     acc: Dict[str, List[str]] = {k: [] for k in wanted}
@@ -241,6 +306,7 @@ def _extract_mnt_fields_from_remarks(data: dict) -> Dict[str, List[str]]:
             if val and val not in acc[key]:
                 acc[key].append(val)
     return acc
+
 
 def _extract_descr_and_geofeed(data: dict):
     descr_list: List[str] = []
@@ -259,6 +325,7 @@ def _extract_descr_and_geofeed(data: dict):
                 for d in (r.get("description") or []):
                     if d: descr_list.append(d.strip())
     return descr_list, geofeed_url
+
 
 def _org_info_from_entities(entities) -> Tuple[str, str, str]:
     org_name = ""
@@ -289,12 +356,14 @@ def _org_info_from_entities(entities) -> Tuple[str, str, str]:
                 break
     return org_name, org_handle, org_address
 
+
 def _ip_version(data: dict) -> str:
     v = data.get("ipVersion", "")
     if v: return v
     sa = data.get("startAddress", "")
     if ":" in sa: return "v6"
     return "v4" if sa else ""
+
 
 def _parse_ip(data: dict) -> dict:
     cidrs: List[str] = []
@@ -314,12 +383,14 @@ def _parse_ip(data: dict) -> dict:
         if "abuse" in _roles(e):
             abuse_email = _vcard(e, "email") or abuse_email
             abuse_tel   = _vcard(e, "tel") or abuse_tel
+
     def _first_handle_with_role(role_name: str) -> str:
         for e in (entities or []):
             if role_name in _roles(e):
                 h = e.get("handle")
                 if h: return h
         return ""
+
     admin_c = _first_handle_with_role("administrative")
     tech_c  = _first_handle_with_role("technical")
     abuse_c = _first_handle_with_role("abuse")
@@ -362,6 +433,7 @@ def _parse_ip(data: dict) -> dict:
         "remarks": data.get("remarks") or [],
     }
 
+
 def _parse_autnum(data: dict) -> dict:
     org = ""; abuse_email = ""; abuse_tel = ""
     for e in (data.get("entities") or []):
@@ -386,6 +458,7 @@ def _parse_autnum(data: dict) -> dict:
         "abuseContact": {"email": abuse_email, "phone": abuse_tel},
     }
 
+
 def _normalize(data: dict) -> dict:
     obj = data.get("objectClassName") or ""
     if not obj:
@@ -396,10 +469,22 @@ def _normalize(data: dict) -> dict:
     if obj == "autnum": return _parse_autnum(data)
     return data
 
+
+# ---------------------------
+# ROUTES
+# ---------------------------
 @app.get("/api/rdap")
 async def api_rdap(q: str = Query(..., description="domena / IP / AS12345")):
-    data = await _fetch_rdap(q.strip())
-    return JSONResponse(_normalize(data))
+    q = q.strip()
+    data = await _fetch_rdap(q)
+    result = _normalize(data)
+
+    # DOŁĄCZ LISTĘ IP-ÓW TYLKO DLA ZAPYTAŃ O DOMENĘ
+    if _detect_kind(q) == "domain" and not _is_ip(q):
+        result["ips"] = _resolve_ips(q)
+
+    return JSONResponse(result)
+
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request, q: Optional[str] = None):
@@ -408,8 +493,14 @@ async def home(request: Request, q: Optional[str] = None):
     error = None
     if q:
         try:
-            rdap_raw = await _fetch_rdap(q.strip())
+            q_clean = q.strip()
+            rdap_raw = await _fetch_rdap(q_clean)
             result = _normalize(rdap_raw)
+
+            # DOŁĄCZ LISTĘ IP-ÓW TYLKO DLA ZAPYTAŃ O DOMENĘ
+            if _detect_kind(q_clean) == "domain" and not _is_ip(q_clean):
+                result["ips"] = _resolve_ips(q_clean)
+
         except HTTPException as e:
             error = f"Błąd: {e.detail}"
         except Exception:
