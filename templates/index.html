@@ -36,10 +36,10 @@
 </head>
 <body>
   <h1>RDAP WHOIS</h1>
-  <p class="muted">Podaj <b>domenę</b>, <b>IP</b> lub <b>AS</b> (np. <code>example.com</code>, <code>1.1.1.1</code>, <code>AS15169</code>).</p>
+  <p class="muted">Podaj <b>domenę</b>, <b>subdomenę</b>, <b>IP</b> lub <b>AS</b> (np. <code>pl.epaka.plus</code>, <code>example.com</code>, <code>1.1.1.1</code>, <code>AS15169</code>).</p>
 
   <form method="get" action="/">
-    <input type="text" name="q" placeholder="example.com" value="{{ q|e }}" autofocus>
+    <input type="text" name="q" placeholder="pl.epaka.plus" value="{{ q|e }}" autofocus>
     <button type="submit">Szukaj</button>
   </form>
 
@@ -96,20 +96,40 @@
         <pre id="copy-summary-domain" style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden;">{{ L|join("\n") }}</pre>
         {# ===== /Podsumowanie (DOMAIN) ===== #}
 
-        {# ======= NOWY BLOK: ADRESY IP (tylko dla domen, jeśli backend zwrócił 'ips') ======= #}
-        {% if result.ips and result.ips|length %}
+        {# ==== NOWE: blok IP dla subdomeny (jeśli różni się od domeny) ==== #}
+        {% if result.queriedHost and result.baseDomain and result.queriedHost|lower != result.baseDomain|lower %}
           <div class="section notice" style="border-radius:8px; padding:.6rem .8rem;">
             <div class="stack">
-              <div><b>Adresy IP:</b></div>
+              <div><b>Adresy IP (subdomena: {{ result.queriedHost }})</b></div>
+              {% if result.subdomainIps is defined and result.subdomainIps|length %}
+                {% for ip in result.subdomainIps %}
+                  <code>{{ ip }}</code>
+                {% endfor %}
+                <button class="copy" data-copy="{{ result.subdomainIps|join(', ') }}" title="Kopiuj IP subdomeny">Kopiuj IP</button>
+              {% else %}
+                <span class="muted small">brak IP</span>
+              {% endif %}
+            </div>
+          </div>
+        {% endif %}
+
+        {# ==== NOWE: blok IP dla domeny ==== #}
+        <div class="section notice" style="border-radius:8px; padding:.6rem .8rem;">
+          <div class="stack">
+            <div><b>Adresy IP (domena: {{ (result.baseDomain or result.domainName)|lower }})</b></div>
+            {% if result.ips is defined and result.ips|length %}
               {% for ip in result.ips %}
                 <code>{{ ip }}</code>
               {% endfor %}
-              <button class="copy" data-copy="{{ result.ips|join(', ') }}" title="Kopiuj wszystkie IP">Kopiuj IP</button>
-            </div>
-            <div class="muted small" style="margin-top:.35rem;">Pobrane z DNS (rekordy A/AAAA) dla nazwy domeny.</div>
+              <button class="copy" data-copy="{{ result.ips|join(', ') }}" title="Kopiuj IP domeny">Kopiuj IP</button>
+            {% else %}
+              <span class="muted small">brak IP</span>
+            {% endif %}
           </div>
-        {% endif %}
-        {# ======= /NOWY BLOK ======= #}
+          {% if result.queriedHost and result.baseDomain and result.queriedHost|lower != result.baseDomain|lower %}
+            <div class="muted small" style="margin-top:.35rem;">RDAP pobrano dla domeny: <code>{{ result.baseDomain }}</code> (z wejścia <code>{{ result.queriedHost }}</code>).</div>
+          {% endif %}
+        </div>
 
         <div class="kv">
           <div>Domain Name</div>
@@ -141,7 +161,6 @@
             {% endfor %}
           {% endif %}
 
-          {# ==== Registrant (.PL) – JEDNA LINIA, PRZECINKAMI ==== #}
           {% if registrant_line %}
             <div>Registrant</div>
             <div class="mono oneline">{{ registrant_line }}</div>
@@ -159,7 +178,6 @@
     {% elif ocn == "ip network" %}
       <div class="card">
 
-        {# ===== Podsumowanie do kopiowania (IP) ===== #}
         {% set LIP = [] %}
         {% macro addip(label, val) -%}{% if val %}{% set _ = LIP.append(label ~ ": " ~ (val if val is string else val)) %}{% endif %}{%- endmacro %}
         {{ addip("Network", (result.handle or result.cidr or result.range)) }}
@@ -189,7 +207,6 @@
         {{ addip("Abuse Email", result.abuseContact.email) }}
         {{ addip("Abuse Phone", result.abuseContact.phone) }}
         <pre id="copy-summary-ip" style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden;">{{ LIP|join("\n") }}</pre>
-        {# ===== /Podsumowanie (IP) ===== #}
 
         <div class="kv">
           <div>Network</div>
