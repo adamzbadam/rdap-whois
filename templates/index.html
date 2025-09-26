@@ -116,7 +116,7 @@
         {# ==== IP dla domeny ==== #}
         <div class="section notice" style="border-radius:8px; padding:.6rem .8rem;">
           <div class="stack">
-            <div><b>Adresy IP (domena: {{ (result.baseDomain or result.domainName)|lower }})</b></div>
+            <div><b>IP: {{ (result.baseDomain or result.domainName)|lower }}</b></div>
             {% if result.ips is defined and result.ips|length %}
               {% for ip in result.ips %}
                 <code>{{ ip }}</code>
